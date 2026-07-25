@@ -23,6 +23,7 @@ source("kobo_connect.R")   # config, fetch, parse -- see that file for details
 # Metric definitions for Form 1 (used by Overview + Facility Trends)
 # ------------------------------------------------------------------------------
 metrics_list <- list(
+  submissions        = list(label = "Number of submissions", type = "count"),
   patients_seen      = list(label = "Total patients seen", type = "sum"),
   total_deaths       = list(label = "Total deaths", type = "sum"),
   death_rate         = list(label = "Death rate (%)", type = "rate",
@@ -40,7 +41,11 @@ metric_choices <- setNames(names(metrics_list), sapply(metrics_list, `[[`, "labe
 
 compute_metric <- function(df, group_vars, metric_key) {
   m <- metrics_list[[metric_key]]
-  if (m$type == "sum") {
+  if (m$type == "count") {
+    df %>%
+      group_by(across(all_of(group_vars))) %>%
+      summarise(value = n(), .groups = "drop")
+  } else if (m$type == "sum") {
     df %>%
       group_by(across(all_of(group_vars))) %>%
       summarise(value = sum(.data[[metric_key]], na.rm = TRUE), .groups = "drop")
