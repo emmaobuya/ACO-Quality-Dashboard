@@ -27,7 +27,7 @@ KOBO_SERVER <- Sys.getenv("KOBO_SERVER", unset = "https://kf.kobotoolbox.org")
 KOBO_TOKEN  <- Sys.getenv("KOBO_TOKEN",  unset = "0b062af63e42714b2be74005a62538a2819514e7")
 ASSET_UID   <- Sys.getenv("ASSET_UID",   unset = "a2uByyb4iqMzEXp8cBZfBh")
 
-REFRESH_SECONDS <- 30  # how often the dashboard re-polls Kobo
+REFRESH_SECONDS <- 300  # how often the dashboard re-polls Kobo
 
 # ------------------------------------------------------------------------------
 # Choice lists (from the XLSForm "choices" sheet) -- the API returns these as
