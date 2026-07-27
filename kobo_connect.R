@@ -44,7 +44,7 @@ category_lookup <- c("1" = "Medical Emergency", "2" = "Surgical Emergency", "3" 
 sex_lookup      <- c("1" = "M (Male)", "2" = "F (Female)")
 triage_lookup   <- c("1" = "Red", "2" = "Yellow", "3" = "Green")
 trigger_lookup  <- c(
-  "1" = "Death <24h", "2" = "Death in A&E", "3" = "Red delay >60min",
+  "1" = "Death <24h", "2" = "Death in >24h", "3" = "Red delay >60min",
   "4" = "Yellow delay >2h", "5" = "No oxygen/resus >30min", "6" = "No antibiotics in 1h",
   "7" = "Deteriorated while waiting", "8" = "Equipment failure", "9" = "Patient lost",
   "10" = "Something felt wrong", "88" = "Other specify"
