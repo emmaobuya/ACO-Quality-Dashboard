@@ -24,7 +24,7 @@ library(stringr)
 # CONFIG -- fill these in (or set as env vars / .Renviron, recommended)
 # ------------------------------------------------------------------------------
 KOBO_SERVER <- Sys.getenv("KOBO_SERVER", unset = "https://kf.kobotoolbox.org")
-KOBO_TOKEN  <- Sys.getenv("KOBO_TOKEN",  unset = "")
+KOBO_TOKEN  <- Sys.getenv("KOBO_TOKEN",  unset = "97cf6251f4e77d891d960454a54f30918916fc24")
 ASSET_UID   <- Sys.getenv("ASSET_UID",   unset = "a2uByyb4iqMzEXp8cBZfBh")
 
 REFRESH_SECONDS <- 300  # how often the dashboard re-polls Kobo
