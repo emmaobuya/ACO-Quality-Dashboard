@@ -101,27 +101,56 @@ safe_time <- function(x) {
 }
 
 # ------------------------------------------------------------------------------
-# Fetch raw submissions from the API
+# Fetch ALL submissions from the API, paging through as needed
+# ------------------------------------------------------------------------------
+# KoboToolbox recently changed this endpoint to only return a single page
+# of results (around 100) per request unless you explicitly page through
+# them -- previously it returned everything in one call. This loops,
+# requesting PAGE_LIMIT records at a time and advancing `start`, until
+# we've collected as many results as Kobo's own reported `count`, so this
+# keeps working correctly regardless of how large the dataset grows. This
+# is the same "keep requesting the next batch until nothing more comes
+# back" pattern others have hit the same issue with on Kobo's forum.
 # ------------------------------------------------------------------------------
 kobo_fetch_raw <- function() {
-  url <- paste0(KOBO_SERVER, "/api/v2/assets/", ASSET_UID, "/data.json")
+  base_url <- paste0(KOBO_SERVER, "/api/v2/assets/", ASSET_UID, "/data.json")
+  page_limit <- 1000  # Kobo's current max page size
 
   h <- new_handle()
   handle_setheaders(h, "Authorization" = paste("Token", KOBO_TOKEN))
 
-  resp <- tryCatch(curl_fetch_memory(url, handle = h), error = function(e) {
-    warning("Kobo API connection failed: ", e$message)
-    NULL
-  })
-  if (is.null(resp)) return(NULL)
+  all_results <- list()
+  start <- 0
+  total_count <- NA_integer_
 
-  if (resp$status_code >= 400) {
-    warning("Kobo API request failed with status ", resp$status_code, ": ",
-            rawToChar(resp$content))
-    return(NULL)
+  repeat {
+    url <- paste0(base_url, "?limit=", page_limit, "&start=", start)
+
+    resp <- tryCatch(curl_fetch_memory(url, handle = h), error = function(e) {
+      warning("Kobo API connection failed: ", e$message)
+      NULL
+    })
+    if (is.null(resp)) return(NULL)
+
+    if (resp$status_code >= 400) {
+      warning("Kobo API request failed with status ", resp$status_code, ": ",
+              rawToChar(resp$content))
+      return(NULL)
+    }
+
+    page <- fromJSON(rawToChar(resp$content), simplifyVector = FALSE)
+    if (is.na(total_count)) total_count <- page$count
+
+    all_results <- c(all_results, page$results)
+    start <- start + page_limit
+
+    # Stop once we've collected everything Kobo says exists, or a page
+    # comes back empty (safety net against an infinite loop if `count`
+    # is ever wrong).
+    if (length(page$results) == 0 || start >= total_count) break
   }
 
-  fromJSON(rawToChar(resp$content), simplifyVector = FALSE)
+  list(count = total_count, results = all_results)
 }
 
 # ------------------------------------------------------------------------------
@@ -245,3 +274,4 @@ load_live_data <- function() {
   })
   parse_kobo_data(raw)
 }
+
