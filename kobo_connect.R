@@ -24,7 +24,7 @@ library(stringr)
 # CONFIG -- fill these in (or set as env vars / .Renviron, recommended)
 # ------------------------------------------------------------------------------
 KOBO_SERVER <- Sys.getenv("KOBO_SERVER", unset = "https://kf.kobotoolbox.org")
-KOBO_TOKEN  <- Sys.getenv("KOBO_TOKEN",  unset = "97cf6251f4e77d891d960454a54f30918916fc24")
+KOBO_TOKEN  <- Sys.getenv("KOBO_TOKEN",  unset = "")
 ASSET_UID   <- Sys.getenv("ASSET_UID",   unset = "a2uByyb4iqMzEXp8cBZfBh")
 
 REFRESH_SECONDS <- 300  # how often the dashboard re-polls Kobo
@@ -115,41 +115,41 @@ safe_time <- function(x) {
 kobo_fetch_raw <- function() {
   base_url <- paste0(KOBO_SERVER, "/api/v2/assets/", ASSET_UID, "/data.json")
   page_limit <- 1000  # Kobo's current max page size
-
+  
   h <- new_handle()
   handle_setheaders(h, "Authorization" = paste("Token", KOBO_TOKEN))
-
+  
   all_results <- list()
   start <- 0
   total_count <- NA_integer_
-
+  
   repeat {
     url <- paste0(base_url, "?limit=", page_limit, "&start=", start)
-
+    
     resp <- tryCatch(curl_fetch_memory(url, handle = h), error = function(e) {
       warning("Kobo API connection failed: ", e$message)
       NULL
     })
     if (is.null(resp)) return(NULL)
-
+    
     if (resp$status_code >= 400) {
       warning("Kobo API request failed with status ", resp$status_code, ": ",
               rawToChar(resp$content))
       return(NULL)
     }
-
+    
     page <- fromJSON(rawToChar(resp$content), simplifyVector = FALSE)
     if (is.na(total_count)) total_count <- page$count
-
+    
     all_results <- c(all_results, page$results)
     start <- start + page_limit
-
+    
     # Stop once we've collected everything Kobo says exists, or a page
     # comes back empty (safety net against an infinite loop if `count`
     # is ever wrong).
     if (length(page$results) == 0 || start >= total_count) break
   }
-
+  
   list(count = total_count, results = all_results)
 }
 
@@ -163,18 +163,18 @@ parse_kobo_data <- function(raw) {
     form3 = data.frame()
   )
   if (is.null(raw) || length(raw$results) == 0) return(empty)
-
+  
   form1_rows <- list()
   form2_rows <- list()
   form3_rows <- list()
-
+  
   for (rec in raw$results) {
-
+    
     root_uuid       <- find_field(rec, "_uuid")
     submission_time <- find_field(rec, "_submission_time")
     facility_code   <- find_field(rec, "_1_What_is_the_Name_of_your_Facility")
     facility_name   <- decode_choice(facility_code, facility_lookup)
-
+    
     # ---- Form 1: shift-level pulse-check ----
     patients_seen   <- safe_num(find_field(rec, "_4_How_many_total_pa_were_seen_this_shift"))
     admitted        <- safe_num(find_field(rec, "_5_How_many_patients_admitted_this_shift"))
@@ -184,7 +184,7 @@ parse_kobo_data <- function(raw) {
     sepsis_cases    <- safe_num(find_field(rec, "_10_How_many_sepsis_were_seen_this_shift"))
     sepsis_bundle_completed <- safe_num(find_field(rec, "_15_How_many_sepsis_bundle_within_1_hour"))
     preventable_flag_raw    <- find_field(rec, "_22_Were_there_any_cases_this_")
-
+    
     form1_rows[[length(form1_rows) + 1]] <- data.frame(
       uuid = as.character(root_uuid),
       submission_time = as_datetime(as.character(submission_time)),
@@ -209,12 +209,12 @@ parse_kobo_data <- function(raw) {
       preventable_count = safe_num(find_field(rec, "_23_If_Yes_how_many_such_cases")),
       stringsAsFactors = FALSE
     )
-
+    
     # ---- Form 2: case event log (repeat) ----
     for (item in find_repeat(rec, "group_form2")) {
       trigger_codes <- find_field(item, "_8_Why_was_this_case_logged_t")
       trigger_labels <- decode_multiselect(trigger_codes, trigger_lookup)
-
+      
       form2_rows[[length(form2_rows) + 1]] <- data.frame(
         parent_uuid = as.character(root_uuid),
         facility = facility_name,
@@ -225,19 +225,20 @@ parse_kobo_data <- function(raw) {
         sex = decode_choice(find_field(item, "_6_What_is_the_patient_s_sex"), sex_lookup),
         triage_category = decode_choice(find_field(item, "_7_What_was_the_pati_nt_s_triage_category"), triage_lookup),
         trigger_combined = paste(trigger_labels, collapse = ", "),
+        narrative = as.character(find_field(item, "_9_In_one_line_what_happened_facts_only")),
         stringsAsFactors = FALSE
       )
     }
-
+    
     # ---- Form 3: patient flow (repeat) ----
     for (item in find_repeat(rec, "group_form3")) {
       t_arrival   <- safe_time(find_field(item, "_5_What_time_did_the_patient_arrive"))
       t_triaged   <- safe_time(find_field(item, "_6_What_time_was_the_patient_triaged"))
       t_clinician <- safe_time(find_field(item, "_7_What_time_was_the_seen_by_a_clinician"))
       t_dispo     <- safe_time(find_field(item, "_8_What_time_was_the_sition_decision_made"))
-
+      
       wrap_forward <- function(mins) ifelse(!is.na(mins) & mins < 0, mins + 1440, mins)
-
+      
       form3_rows[[length(form3_rows) + 1]] <- data.frame(
         parent_uuid = as.character(root_uuid),
         facility = facility_name,
@@ -256,7 +257,7 @@ parse_kobo_data <- function(raw) {
       )
     }
   }
-
+  
   list(
     form1 = bind_rows(form1_rows),
     form2 = bind_rows(form2_rows),
@@ -274,4 +275,5 @@ load_live_data <- function() {
   })
   parse_kobo_data(raw)
 }
+
 
