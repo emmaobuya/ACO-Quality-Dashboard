@@ -20,7 +20,7 @@ library(lubridate)
 source("kobo_connect.R")   # config, fetch, parse -- see that file for details
 
 # ------------------------------------------------------------------------------
-# Metric definitions for Form 1 (used by Overview + Facility Trends)
+# Metric definitions for Form 1 (used by Overview + Facility Trends + Weekly Signals)
 # ------------------------------------------------------------------------------
 metrics_list <- list(
   submissions        = list(label = "Number of submissions", type = "count"),
@@ -61,6 +61,17 @@ compute_metric <- function(df, group_vars, metric_key) {
   }
 }
 
+# Weekly Signals shows this fixed set of key KPIs side by side, one column
+# per metric, one row per week -- easier to scan for a sudden shift than
+# picking through metrics one at a time.
+WEEKLY_SIGNAL_METRICS <- c("submissions", "patients_seen", "death_rate", "lwbs_rate",
+                            "sepsis_bundle_rate", "red_delay_60min", "yellow_delay_2h",
+                            "equipment_failures", "preventable_count")
+
+# Shift ordering within a day, used to determine "the previous shift"
+# chronologically (a plain date sort alone can't tell Morning from Night).
+SHIFT_ORDER <- c("Morning" = 1, "Afternoon" = 2, "Night" = 3)
+
 # Facility/shift choices come from the form definition, not the data, so the
 # UI can be built before the first API call completes.
 facility_choices <- unname(facility_lookup)
@@ -87,16 +98,16 @@ ui <- page_navbar(
     hr(),
     textOutput("connection_status"),
     p(class = "text-muted small",
-      paste0("Auto-refreshes every ", REFRESH_SECONDS, " seconds. ",
-             "Case-level narratives are intentionally excluded -- only categories and counts are shown."))
+      paste0("Auto-refreshes every ", REFRESH_SECONDS, " seconds."))
   ),
 
   nav_panel(
     "Overview",
     layout_columns(
-      col_widths = c(2, 3, 2, 2, 3),
+      col_widths = c(2, 2, 2, 2, 2, 2),
       value_box(title = "Total submissions", value = textOutput("kpi_total_submissions"), showcase = icon("clipboard-list")),
       value_box(title = "Patients seen", value = textOutput("kpi_patients"), showcase = icon("users")),
+      value_box(title = "Patients seen (previous shift)", value = textOutput("kpi_prev_shift_patients"), showcase = icon("clock-rotate-left")),
       value_box(title = "Death rate", value = textOutput("kpi_death_rate"), showcase = icon("heart-pulse")),
       value_box(title = "LWBS rate", value = textOutput("kpi_lwbs_rate"), showcase = icon("person-walking-arrow-right")),
       value_box(title = "Sepsis bundle compliance", value = textOutput("kpi_sepsis_rate"), showcase = icon("syringe"))
@@ -119,6 +130,28 @@ ui <- page_navbar(
         ),
         plotlyOutput("trend_chart", height = "320px")
       )
+    )
+  ),
+
+  nav_panel(
+    "Weekly Signals",
+    p(class = "text-muted small",
+      "Key KPIs rolled up by week (Monday-starting), using the sidebar's Facility/Shift/Date filters -- scan across weeks to spot a sudden shift."),
+    layout_columns(
+      col_widths = c(4, 8),
+      card(
+        card_header("Metric"),
+        selectInput("weekly_metric", NULL, choices = metric_choices, width = "100%"),
+        p(class = "text-muted small", "Choose which metric the trend chart on the right shows. The table below always shows all key metrics together.")
+      ),
+      card(
+        card_header("Weekly Trend"),
+        plotlyOutput("weekly_trend_chart", height = "320px")
+      )
+    ),
+    card(
+      card_header("Weekly Signals Table"),
+      DTOutput("weekly_signals_table")
     )
   ),
 
@@ -158,7 +191,7 @@ ui <- page_navbar(
       )
     ),
     card(
-      card_header("Logged cases (summary -- narratives not shown)"),
+      card_header("Logged cases, with narrative"),
       DTOutput("event_log_table")
     )
   ),
@@ -262,6 +295,22 @@ server <- function(input, output, session) {
     format(sum(df$patients_seen, na.rm = TRUE), big.mark = ",")
   })
 
+  # "Previous shift" = the second-most-recent shift record chronologically
+  # within the current filters (ordered by date, then Morning/Afternoon/
+  # Night within a day) -- one step back from whatever's most recent.
+  output$kpi_prev_shift_patients <- renderText({
+    df <- f1_filtered()
+    if (nrow(df) < 2) return("--")
+    df <- df %>%
+      mutate(shift_rank = SHIFT_ORDER[shift]) %>%
+      filter(!is.na(shift_rank)) %>%
+      arrange(date, shift_rank)
+    if (nrow(df) < 2) return("--")
+    v <- df$patients_seen[nrow(df) - 1]
+    if (is.na(v)) return("--")
+    format(v, big.mark = ",")
+  })
+
   output$kpi_death_rate <- renderText({
     df <- f1_filtered()
     if (nrow(df) == 0) return("--")
@@ -306,6 +355,39 @@ server <- function(input, output, session) {
     lbl <- metrics_list[[input$overview_metric_trend]]$label
     plot_ly(m, x = ~date, y = ~value, color = ~facility, type = "scatter", mode = "lines+markers") |>
       layout(xaxis = list(title = ""), yaxis = list(title = lbl))
+  })
+
+  # ---- Weekly Signals tab ----
+  weekly_data <- reactive({
+    df <- f1_filtered()
+    if (nrow(df) == 0) return(df)
+    df %>% mutate(week_start = floor_date(date, "week", week_start = 1))
+  })
+
+  output$weekly_trend_chart <- renderPlotly({
+    req(input$weekly_metric)
+    df <- weekly_data()
+    if (nrow(df) == 0) return(plotly_empty(type = "scatter") |> layout(title = "No data for current filters"))
+    m <- compute_metric(df, "week_start", input$weekly_metric)
+    lbl <- metrics_list[[input$weekly_metric]]$label
+    plot_ly(m, x = ~week_start, y = ~value, type = "scatter", mode = "lines+markers") |>
+      layout(xaxis = list(title = "Week starting"), yaxis = list(title = lbl))
+  })
+
+  output$weekly_signals_table <- renderDT({
+    df <- weekly_data()
+    if (nrow(df) == 0) {
+      return(datatable(data.frame(Message = "No data for current filters"), rownames = FALSE))
+    }
+    weeks <- sort(unique(df$week_start))
+    out <- data.frame(Week = format(weeks, "%d %b %Y"))
+    for (mkey in WEEKLY_SIGNAL_METRICS) {
+      m <- compute_metric(df, "week_start", mkey)
+      lbl <- metrics_list[[mkey]]$label
+      vals <- m$value[match(weeks, m$week_start)]
+      out[[lbl]] <- if (metrics_list[[mkey]]$type == "rate") round(vals, 1) else vals
+    }
+    datatable(out, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
   })
 
   # ---- Facility Trends tab ----
@@ -354,10 +436,10 @@ server <- function(input, output, session) {
       return(datatable(data.frame(Message = "No triggered cases for current filters"), rownames = FALSE))
     }
     df <- df %>%
-      select(event_date, facility, category, triage_category, age, sex, trigger_combined) %>%
+      select(event_date, facility, category, triage_category, age, sex, trigger_combined, narrative) %>%
       arrange(desc(event_date))
     datatable(df, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE,
-              colnames = c("Date", "Facility", "Category", "Triage", "Age", "Sex", "Trigger reason(s)"))
+              colnames = c("Date", "Facility", "Category", "Triage", "Age", "Sex", "Trigger reason(s)", "Narrative"))
   })
 
   # ---- Patient Flow tab ----
