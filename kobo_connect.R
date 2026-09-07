@@ -1,14 +1,22 @@
 # ==============================================================================
-# Acclaim -- Live KoboToolbox connection
-# Updated: field names verified against XLSForm a2uByyb4iqMzEXp8cBZfBh (2026-08-27)
+# ECO -- Live KoboToolbox connection
+# Updated: field names re-verified against XLSForm a2uByyb4iqMzEXp8cBZfBh (2026-09-07)
 #
 # Changes from previous version:
 #   1. facility_lookup expanded from 10 → 15 facilities
 #   2. Form 3 outcome field: _11_ → _12_ (question renumbered in form)
 #   3. Form 3 sepsis_bundle question removed from form — field dropped
-#   4. Form 1 _6_ field: internal name looks like deaths but label = "discharged"
-#      Mapped correctly as `discharged` not deaths
-#   5. load_live_data() has safe fallback — app never crashes on API failure
+#   4. Form 1 _6_ field: internal name looks like deaths but label is actually
+#      "transferred out of A&E" -- renamed `transferred_out`, not deaths
+#   5. FIXED: total_deaths was hardcoded to 0 with a comment claiming the form
+#      had no deaths question. It does: _8_a_How_many_patinets_died. This is
+#      why the death rate never moved -- it's now read properly.
+#   6. FIXED: nine other Form 1 fields (LWBS, red/yellow delays, sepsis cases/
+#      bundle/antibiotics, deteriorated-waiting, equipment failures, patients
+#      lost, preventable count) were pointing at old pre-renumbering question
+#      names and returning nothing. All re-mapped to the current form.
+#   7. Added new _5b_ "patients on ward at end of shift" field.
+#   8. load_live_data() has safe fallback — app never crashes on API failure
 # ==============================================================================
 
 library(curl)
@@ -174,18 +182,23 @@ parse_kobo_data <- function(raw) {
     facility_raw    <- find_field(rec, "_1_What_is_the_Name_of_your_Facility")
     facility_name   <- decode_choice(facility_raw, facility_lookup)
 
-    # ── FORM 1 ── (XLSForm field names, verified against survey sheet)
+    # ── FORM 1 ── (field names re-verified against the current XLSForm's
+    # survey sheet on 2026-09-07 -- the form was renumbered from Q9 onward at
+    # some point and this connector had drifted out of sync with it, which is
+    # why several metrics -- deaths above all -- were reading nothing.)
     patients_seen <- safe_num(find_field(rec, "_4_How_many_total_pa_were_seen_this_shift"))
     admitted      <- safe_num(find_field(rec, "_5_How_many_patients_admitted_this_shift"))
-    # _6_ internal name looks like deaths but the label is "discharged this shift"
-    discharged    <- safe_num(find_field(rec, "_6_How_many_deaths_o_24_hours_of_arrival"))
-    sepsis_cases  <- safe_num(find_field(rec, "_10_How_many_sepsis_were_seen_this_shift"))
-    sepsis_bundle <- safe_num(find_field(rec, "_15_How_many_sepsis_bundle_within_1_hour"))
-    sepsis_no_abx <- safe_num(find_field(rec, "_21_How_many_sepsis_iotics_within_1_hour"))
+    on_ward_eos   <- safe_num(find_field(rec, "_5b_How_many_patients_the_end_of_the_shift"))
+    # _6_ internal name looks like deaths but the label is actually
+    # "how many patients were transferred out of A&E during this shift"
+    transferred_out <- safe_num(find_field(rec, "_6_How_many_deaths_o_24_hours_of_arrival"))
+    # THE deaths field: "8. How many patients died during this shift?"
+    deaths_this_shift <- safe_num(find_field(rec, "_8_a_How_many_patinets_died"))
+    sepsis_cases  <- safe_num(find_field(rec, "_11_How_many_sepsis_were_seen_"))
+    sepsis_bundle <- safe_num(find_field(rec, "_13_How_many_sepsis_bundle_wit"))
+    sepsis_no_abx <- safe_num(find_field(rec, "_12_How_many_sepsis_iotics_wit"))
     prev_raw      <- find_field(rec, "_22_Were_there_any_cases_this_")
 
-    # NOTE: total_deaths no longer has its own dedicated question in the current
-    # form. Set to 0; the event log (Form 2) is the source of truth for deaths.
     form1_rows[[length(form1_rows) + 1]] <- data.frame(
       uuid                    = as.character(root_uuid),
       submission_time         = as_datetime(as.character(submission_time)),
@@ -194,21 +207,22 @@ parse_kobo_data <- function(raw) {
       shift                   = decode_choice(find_field(rec, "_3_Which_shift_is_this_for"), shift_lookup),
       patients_seen           = patients_seen,
       admitted                = admitted,
-      discharged              = discharged,
-      total_deaths            = 0L,   # no dedicated deaths question in current form
+      on_ward_end_of_shift    = on_ward_eos,
+      transferred_out         = transferred_out,
+      total_deaths            = deaths_this_shift,
       deaths_24h              = 0L,
       deaths_after24h         = 0L,
-      lwbs                    = safe_num(find_field(rec, "_8_How_many_patients_out_being_seen_LWBS")),
-      red_delay_60min         = safe_num(find_field(rec, "_9_How_many_Red_tria_more_than_60_minutes")),
+      lwbs                    = safe_num(find_field(rec, "_9_How_many_patients_out_being")),
+      red_delay_60min         = safe_num(find_field(rec, "_10_How_many_Red_tria_more")),
       sepsis_cases            = sepsis_cases,
       sepsis_bundle_completed = sepsis_bundle,
       sepsis_no_antibiotics   = sepsis_no_abx,
-      deteriorated_waiting    = safe_num(find_field(rec, "_17_How_many_patient_ned_shock_developed")),
-      equipment_failures      = safe_num(find_field(rec, "_18_How_many_critica_lator_oxygen_supply")),
-      patients_lost           = safe_num(find_field(rec, "_19_How_many_triaged_efore_receiving_care")),
-      yellow_delay_2h         = safe_num(find_field(rec, "_20_How_many_Yellow_seen_by_a_clinician")),
+      deteriorated_waiting    = safe_num(find_field(rec, "_15_How_many_patient_ned_shock")),
+      equipment_failures      = safe_num(find_field(rec, "_16_How_many_critica_lator_oxy")),
+      patients_lost           = safe_num(find_field(rec, "_17_How_many_triaged_efore_rec")),
+      yellow_delay_2h         = safe_num(find_field(rec, "_18_How_many_Yellow_seen_by_a_")),
       preventable_flag        = identical(decode_choice(prev_raw, yesno_lookup), "Yes"),
-      preventable_count       = safe_num(find_field(rec, "_23_If_Yes_how_many_such_cases")),
+      preventable_count       = safe_num(find_field(rec, "_20_If_Yes_how_many_such_cases")),
       stringsAsFactors = FALSE
     )
 
@@ -292,7 +306,4 @@ load_live_data <- function() {
   warning("Returning empty data -- check KOBO_TOKEN and ASSET_UID env vars")
   list(form1 = data.frame(), form2 = data.frame(), form3 = data.frame())
 }
-
-
-
 
