@@ -1,5 +1,5 @@
 # ==============================================================================
-# Acclaim -- Emergency Department Quality & Safety Dashboard (LIVE)
+# ECo -- Emergency Department Quality & Safety Dashboard (LIVE)
 # ==============================================================================
 # Connects directly to KoboToolbox -- no export file needed. Polls the API
 # every REFRESH_SECONDS (set in kobo_connect.R) and refreshes automatically.
@@ -68,6 +68,23 @@ WEEKLY_SIGNAL_METRICS <- c("submissions", "patients_seen", "death_rate", "lwbs_r
                             "sepsis_bundle_rate", "red_delay_60min", "yellow_delay_2h",
                             "equipment_failures", "preventable_count")
 
+# Icon + direction metadata for the Weekly Signals placards.
+# direction controls how a week-over-week change is colored:
+#   "down_is_good" -- a rise is bad news (danger), a fall is good news (success)
+#   "up_is_good"   -- the reverse (e.g. compliance rates)
+#   "neutral"      -- volume metrics; shown as info, no good/bad judgement
+WEEKLY_SIGNAL_META <- list(
+  submissions         = list(icon = "clipboard-list",              direction = "neutral"),
+  patients_seen       = list(icon = "users",                       direction = "neutral"),
+  death_rate          = list(icon = "heart-pulse",                 direction = "down_is_good"),
+  lwbs_rate           = list(icon = "person-walking-arrow-right",  direction = "down_is_good"),
+  sepsis_bundle_rate  = list(icon = "syringe",                     direction = "up_is_good"),
+  red_delay_60min     = list(icon = "hourglass-half",               direction = "down_is_good"),
+  yellow_delay_2h     = list(icon = "clock",                       direction = "down_is_good"),
+  equipment_failures  = list(icon = "screwdriver-wrench",          direction = "down_is_good"),
+  preventable_count   = list(icon = "triangle-exclamation",        direction = "down_is_good")
+)
+
 # Shift ordering within a day, used to determine "the previous shift"
 # chronologically (a plain date sort alone can't tell Morning from Night).
 SHIFT_ORDER <- c("Morning" = 1, "Afternoon" = 2, "Night" = 3)
@@ -103,15 +120,7 @@ ui <- page_navbar(
 
   nav_panel(
     "Overview",
-    layout_columns(
-      col_widths = c(2, 2, 2, 2, 2, 2),
-      value_box(title = "Total submissions", value = textOutput("kpi_total_submissions"), showcase = icon("clipboard-list")),
-      value_box(title = "Patients seen", value = textOutput("kpi_patients"), showcase = icon("users")),
-      value_box(title = "Patients seen (previous shift)", value = textOutput("kpi_prev_shift_patients"), showcase = icon("clock-rotate-left")),
-      value_box(title = "Death rate", value = textOutput("kpi_death_rate"), showcase = icon("heart-pulse")),
-      value_box(title = "LWBS rate", value = textOutput("kpi_lwbs_rate"), showcase = icon("person-walking-arrow-right")),
-      value_box(title = "Sepsis bundle compliance", value = textOutput("kpi_sepsis_rate"), showcase = icon("syringe"))
-    ),
+    uiOutput("overview_kpis"),
     layout_columns(
       col_widths = c(6, 6),
       card(
@@ -136,19 +145,23 @@ ui <- page_navbar(
   nav_panel(
     "Weekly Signals",
     p(class = "text-muted small",
-      "Key KPIs rolled up by week (Monday-starting), using the sidebar's Facility/Shift/Date filters -- scan across weeks to spot a sudden shift."),
+      "Key KPIs rolled up by week (Monday-starting), using the sidebar's Facility/Shift/Date filters. Pick a week to see its placards; each one shows the change from the week before."),
     layout_columns(
-      col_widths = c(4, 8),
+      col_widths = c(3, 9),
       card(
-        card_header("Metric"),
-        selectInput("weekly_metric", NULL, choices = metric_choices, width = "100%"),
-        p(class = "text-muted small", "Choose which metric the trend chart on the right shows. The table below always shows all key metrics together.")
+        card_header("Select Week"),
+        selectInput("weekly_week", NULL, choices = NULL, width = "100%"),
+        p(class = "text-muted small",
+          "Placard colors: green = improved vs last week, red = worsened, gray = no meaningful change. Submissions and patients seen are volume only, shown in blue."),
+        hr(),
+        selectInput("weekly_metric", "Trend chart metric", choices = metric_choices, width = "100%")
       ),
       card(
         card_header("Weekly Trend"),
-        plotlyOutput("weekly_trend_chart", height = "320px")
+        plotlyOutput("weekly_trend_chart", height = "300px")
       )
     ),
+    uiOutput("weekly_placards"),
     card(
       card_header("Weekly Signals Table"),
       DTOutput("weekly_signals_table")
@@ -285,54 +298,64 @@ server <- function(input, output, session) {
   })
 
   # ---- Overview KPIs ----
-  output$kpi_total_submissions <- renderText({
-    format(nrow(f1_filtered()), big.mark = ",")
-  })
-
-  output$kpi_patients <- renderText({
+  # Total submissions and patients seen come from Form 1 (the per-shift
+  # tally). Still-in-A&E, deaths, and LWBS now come from Form 3 instead --
+  # it's one row per patient with an actual 24h outcome, so it's a more
+  # reliable count than the shift-level tally questions in Form 1.
+  # Colors carry meaning: green/amber/red thresholds on the metrics that
+  # have a clear good/bad direction; neutral accents on pure volume metrics.
+  output$overview_kpis <- renderUI({
     df <- f1_filtered()
-    if (nrow(df) == 0) return("--")
-    format(sum(df$patients_seen, na.rm = TRUE), big.mark = ",")
-  })
+    f3 <- f3_filtered()
 
-  # "Previous shift" = the second-most-recent shift record chronologically
-  # within the current filters (ordered by date, then Morning/Afternoon/
-  # Night within a day) -- one step back from whatever's most recent.
-  output$kpi_prev_shift_patients <- renderText({
-    df <- f1_filtered()
-    if (nrow(df) < 2) return("--")
-    df <- df %>%
-      mutate(shift_rank = SHIFT_ORDER[shift]) %>%
-      filter(!is.na(shift_rank)) %>%
-      arrange(date, shift_rank)
-    if (nrow(df) < 2) return("--")
-    v <- df$patients_seen[nrow(df) - 1]
-    if (is.na(v)) return("--")
-    format(v, big.mark = ",")
-  })
+    total_submissions <- nrow(df)
+    patients <- if (nrow(df) == 0) NA_real_ else sum(df$patients_seen, na.rm = TRUE)
 
-  output$kpi_death_rate <- renderText({
-    df <- f1_filtered()
-    if (nrow(df) == 0) return("--")
-    tot <- sum(df$patients_seen, na.rm = TRUE)
-    if (tot == 0) return("--")
-    paste0(round(100 * sum(df$total_deaths, na.rm = TRUE) / tot, 1), "%")
-  })
+    f3_total <- nrow(f3)
+    outcome_n   <- function(label) if (f3_total == 0) NA_real_ else sum(f3$outcome_24h == label, na.rm = TRUE)
+    outcome_pct <- function(n) if (f3_total == 0 || is.na(n)) NA_real_ else 100 * n / f3_total
 
-  output$kpi_lwbs_rate <- renderText({
-    df <- f1_filtered()
-    if (nrow(df) == 0) return("--")
-    tot <- sum(df$patients_seen, na.rm = TRUE)
-    if (tot == 0) return("--")
-    paste0(round(100 * sum(df$lwbs, na.rm = TRUE) / tot, 1), "%")
-  })
+    still_ae_n <- outcome_n("Still in A&E")
+    died_n     <- outcome_n("Died")
+    lwbs_n     <- outcome_n("LWBS")
+    still_ae_pct <- outcome_pct(still_ae_n)
+    lwbs_pct     <- outcome_pct(lwbs_n)
 
-  output$kpi_sepsis_rate <- renderText({
-    df <- f1_filtered()
-    if (nrow(df) == 0) return("--")
-    tot <- sum(df$sepsis_cases, na.rm = TRUE)
-    if (tot == 0) return("--")
-    paste0(round(100 * sum(df$sepsis_bundle_completed, na.rm = TRUE) / tot, 1), "%")
+    sepsis_tot  <- if (nrow(df) == 0) NA_real_ else sum(df$sepsis_cases, na.rm = TRUE)
+    sepsis_rate <- if (is.na(sepsis_tot) || sepsis_tot == 0) NA_real_ else
+      100 * sum(df$sepsis_bundle_completed, na.rm = TRUE) / sepsis_tot
+
+    fmt_int <- function(v) if (is.na(v)) "--" else format(round(v), big.mark = ",")
+    fmt_pct <- function(v) if (is.na(v)) "--" else paste0(round(v, 1), "%")
+    subtitle <- function(pct, label) {
+      if (is.na(pct)) p(class = "text-muted small", paste0("No ", label, " data")) else
+        p(class = "text-muted small", paste0(round(pct, 1), "% of Form 3 patients"))
+    }
+
+    # Threshold-based coloring
+    deaths_theme   <- if (is.na(died_n)) "secondary" else if (died_n == 0) "success" else "danger"
+    still_ae_theme <- if (is.na(still_ae_pct)) "secondary" else if (still_ae_pct >= 30) "danger" else if (still_ae_pct >= 15) "warning" else "success"
+    lwbs_theme     <- if (is.na(lwbs_pct)) "secondary" else if (lwbs_pct >= 10) "danger" else if (lwbs_pct >= 5) "warning" else "success"
+    sepsis_theme   <- if (is.na(sepsis_rate)) "secondary" else if (sepsis_rate >= 90) "success" else if (sepsis_rate >= 70) "warning" else "danger"
+
+    layout_columns(
+      col_widths = c(2, 2, 2, 2, 2, 2),
+      value_box(title = "Total submissions", value = fmt_int(total_submissions),
+                showcase = icon("clipboard-list"), theme = "primary"),
+      value_box(title = "Patients seen", value = fmt_int(patients),
+                showcase = icon("users"), theme = "info"),
+      value_box(title = "Still in A&E (24h)", value = fmt_int(still_ae_n),
+                showcase = icon("hospital"), theme = still_ae_theme,
+                subtitle(still_ae_pct, "outcome")),
+      value_box(title = "Total deaths", value = fmt_int(died_n),
+                showcase = icon("heart-pulse"), theme = deaths_theme,
+                subtitle(outcome_pct(died_n), "outcome")),
+      value_box(title = "LWBS (24h)", value = fmt_int(lwbs_n),
+                showcase = icon("person-walking-arrow-right"), theme = lwbs_theme,
+                subtitle(lwbs_pct, "outcome")),
+      value_box(title = "Sepsis bundle compliance", value = fmt_pct(sepsis_rate),
+                showcase = icon("syringe"), theme = sepsis_theme)
+    )
   })
 
   # ---- Overview: facility comparison chart ----
@@ -364,6 +387,33 @@ server <- function(input, output, session) {
     df %>% mutate(week_start = floor_date(date, "week", week_start = 1))
   })
 
+  # All-metric summary table, one row per week -- computed once and reused
+  # by both the placards and the table below, so they always agree.
+  weekly_summary <- reactive({
+    df <- weekly_data()
+    if (nrow(df) == 0) return(NULL)
+    weeks <- sort(unique(df$week_start))
+    out <- data.frame(week_start = weeks)
+    for (mkey in WEEKLY_SIGNAL_METRICS) {
+      m <- compute_metric(df, "week_start", mkey)
+      out[[mkey]] <- m$value[match(weeks, m$week_start)]
+    }
+    out
+  })
+
+  # Populate the week selector once data is available; default to the most
+  # recent week. Re-populate (without resetting the user's choice where
+  # possible) whenever the set of available weeks changes.
+  observeEvent(weekly_summary(), {
+    ws <- weekly_summary()
+    if (is.null(ws) || nrow(ws) == 0) return()
+    weeks <- sort(ws$week_start, decreasing = TRUE)
+    choices <- setNames(as.character(weeks), format(weeks, "Week of %d %b %Y"))
+    current <- input$weekly_week
+    selected <- if (!is.null(current) && current %in% choices) current else choices[[1]]
+    updateSelectInput(session, "weekly_week", choices = choices, selected = selected)
+  })
+
   output$weekly_trend_chart <- renderPlotly({
     req(input$weekly_metric)
     df <- weekly_data()
@@ -372,6 +422,67 @@ server <- function(input, output, session) {
     lbl <- metrics_list[[input$weekly_metric]]$label
     plot_ly(m, x = ~week_start, y = ~value, type = "scatter", mode = "lines+markers") |>
       layout(xaxis = list(title = "Week starting"), yaxis = list(title = lbl))
+  })
+
+  # ---- Weekly Signals: colored KPI placards for the selected week ----
+  output$weekly_placards <- renderUI({
+    ws <- weekly_summary()
+    if (is.null(ws) || nrow(ws) == 0 || is.null(input$weekly_week) || input$weekly_week == "") {
+      return(card(class = "mt-3", card_body("No data for current filters.")))
+    }
+    sel_week <- as_date(input$weekly_week)
+    ws <- ws %>% arrange(week_start)
+    row_idx <- match(sel_week, ws$week_start)
+    if (is.na(row_idx)) return(NULL)
+    prev_idx <- row_idx - 1  # NA if this is the first week on record
+
+    boxes <- lapply(WEEKLY_SIGNAL_METRICS, function(mkey) {
+      meta   <- WEEKLY_SIGNAL_META[[mkey]]
+      lbl    <- metrics_list[[mkey]]$label
+      is_pct <- metrics_list[[mkey]]$type == "rate"
+      cur    <- ws[[mkey]][row_idx]
+      prev   <- if (!is.na(prev_idx) && prev_idx >= 1) ws[[mkey]][prev_idx] else NA
+
+      fmt <- function(v) {
+        if (is.na(v)) return("--")
+        if (is_pct) paste0(round(v, 1), "%") else format(round(v, 1), big.mark = ",")
+      }
+
+      # Decide color + change text
+      if (is.na(cur)) {
+        theme_color <- "secondary"
+        change_text <- "No data this week"
+      } else if (is.na(prev)) {
+        theme_color <- if (meta$direction == "neutral") "info" else "secondary"
+        change_text <- "No prior week to compare"
+      } else {
+        delta <- cur - prev
+        if (meta$direction == "neutral") {
+          theme_color <- "info"
+          arrow <- if (delta > 0) "arrow-up" else if (delta < 0) "arrow-down" else "minus"
+          change_text <- paste0(icon(arrow), " ", fmt(abs(delta)), " vs last week")
+        } else {
+          improved <- if (meta$direction == "down_is_good") delta < 0 else delta > 0
+          worsened <- if (meta$direction == "down_is_good") delta > 0 else delta < 0
+          theme_color <- if (delta == 0) "secondary" else if (improved) "success" else "danger"
+          arrow <- if (delta == 0) "minus" else if (worsened) "arrow-up" else "arrow-down"
+          change_text <- paste0(icon(arrow), " ", fmt(abs(delta)), " vs last week")
+        }
+      }
+
+      value_box(
+        title = lbl,
+        value = fmt(cur),
+        showcase = icon(meta$icon),
+        theme = theme_color,
+        p(HTML(change_text))
+      )
+    })
+
+    tagList(
+      h6(class = "mt-3 text-muted", format(sel_week, "Placards for week of %d %b %Y")),
+      do.call(layout_columns, c(list(col_widths = c(4, 4, 4, 4, 4, 4, 4, 4, 4)), boxes))
+    )
   })
 
   output$weekly_signals_table <- renderDT({
