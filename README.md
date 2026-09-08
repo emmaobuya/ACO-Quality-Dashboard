@@ -1,4 +1,4 @@
-# Acclaim ED Quality Dashboard — Setup Guide (Live Version)
+# ACO Quality Dashboard — Setup Guide (Live Version)
 
 ## Files
 
