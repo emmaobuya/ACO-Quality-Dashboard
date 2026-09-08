@@ -98,7 +98,7 @@ shift_choices <- unname(shift_lookup)
 # UI
 # ------------------------------------------------------------------------------
 ui <- page_navbar(
-  title = "ACO Quality Dashboard (Live)",
+  title = "ACO Dashboard (Live)",
   theme = bs_theme(version = 5, bootswatch = "flatly"),
   fillable = TRUE,
 
