@@ -1,5 +1,5 @@
 # ==============================================================================
-# ECO -- Emergency Department Quality & Safety Dashboard (LIVE)
+# ACO -- Emergency Department Quality & Safety Dashboard (LIVE)
 # ==============================================================================
 # Connects directly to KoboToolbox -- no export file needed. Polls the API
 # every REFRESH_SECONDS (set in kobo_connect.R) and refreshes automatically.
