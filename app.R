@@ -1,5 +1,5 @@
 # ==============================================================================
-# ECo -- Emergency Department Quality & Safety Dashboard (LIVE)
+# ECO -- Emergency Department Quality & Safety Dashboard (LIVE)
 # ==============================================================================
 # Connects directly to KoboToolbox -- no export file needed. Polls the API
 # every REFRESH_SECONDS (set in kobo_connect.R) and refreshes automatically.
@@ -98,7 +98,7 @@ shift_choices <- unname(shift_lookup)
 # UI
 # ------------------------------------------------------------------------------
 ui <- page_navbar(
-  title = "Acclaim -- ED Quality Dashboard (Live)",
+  title = "ACO Quality Dashboard (Live)",
   theme = bs_theme(version = 5, bootswatch = "flatly"),
   fillable = TRUE,
 
