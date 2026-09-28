@@ -29,6 +29,8 @@
 #      own Health Facility filter. Needs the updated kobo_connect.R.
 #   6. Q14 table gets a week filter (defaults to the current running week);
 #      every bar chart now shows its value on top of / inside each bar.
+#   7. Office-screen mode: tabs rotate every ROTATE_SECONDS (sidebar switch,
+#      or ?kiosk=1 in the link); page reloads itself after a disconnect.
 # ==============================================================================
 
 library(shiny)
@@ -146,6 +148,14 @@ week_label <- function(ws) {
 # chronologically (a plain date sort alone can't tell Morning from Night).
 SHIFT_ORDER <- c("Morning" = 1, "Afternoon" = 2, "Night" = 3)
 
+# ---- Office-screen (kiosk) mode ----
+# Tabs the dashboard cycles through, in order, and how long each one stays
+# on screen. Turn it on with the "Auto-rotate tabs" switch in the sidebar,
+# or open the dashboard with ?kiosk=1 at the end of the link, which also
+# hides the sidebar -- use that link on the office screen.
+ROTATE_TABS    <- c("Overview", "Weekly Signals", "Facility Trends")
+ROTATE_SECONDS <- 60
+
 # Facility/shift choices come from the form definition, not the data, so the
 # UI can be built before the first API call completes.
 facility_choices <- unname(facility_lookup)
@@ -155,7 +165,17 @@ shift_choices <- unname(shift_lookup)
 # UI
 # ------------------------------------------------------------------------------
 ui <- page_navbar(
+  id = "main_nav",
   title = "ACO Dashboard (Live)",
+  header = tagList(
+    # Keep outputs at full colour during the 5-minute refresh.
+    tags$style(HTML(".recalculating { opacity: 1 !important; }")),
+    # If the connection drops (e.g. overnight Wi-Fi blip), reload the page
+    # after 10 seconds instead of leaving a grey screen on the wall.
+    tags$script(HTML(
+      "$(document).on('shiny:disconnected', function(){ setTimeout(function(){ location.reload(); }, 10000); });"
+    ))
+  ),
   theme = bs_theme(version = 5, bootswatch = "flatly"),
   # FALSE so cards keep their natural height -- with TRUE, the Weekly
   # Signals tab squashed the week selector, trend chart and table into
@@ -163,6 +183,7 @@ ui <- page_navbar(
   fillable = FALSE,
 
   sidebar = sidebar(
+    id = "main_sidebar",
     width = 280,
     h5("Filters"),
     selectInput("f_facility", "Health Facility",
@@ -172,6 +193,10 @@ ui <- page_navbar(
                         selected = shift_choices),
     dateRangeInput("f_dates", "Date range",
                     start = Sys.Date() - 90, end = Sys.Date()),
+    hr(),
+    checkboxInput("auto_rotate",
+                  paste0("Auto-rotate tabs every ", ROTATE_SECONDS, "s (office screen)"),
+                  value = FALSE),
     hr(),
     textOutput("connection_status"),
     p(class = "text-muted small",
@@ -300,6 +325,35 @@ ui <- page_navbar(
 # SERVER
 # ------------------------------------------------------------------------------
 server <- function(input, output, session) {
+
+  # ---- Office-screen mode: cycle through tabs automatically ----
+  # ?kiosk=1 in the link switches rotation on and hides the sidebar.
+  observeEvent(session$clientData$url_search, {
+    q <- parseQueryString(session$clientData$url_search)
+    if (!is.null(q$kiosk) && tolower(q$kiosk) %in% c("1", "true", "yes")) {
+      updateCheckboxInput(session, "auto_rotate", value = TRUE)
+      if (exists("toggle_sidebar", where = asNamespace("bslib"), inherits = FALSE)) {
+        bslib::toggle_sidebar("main_sidebar", open = FALSE)
+      }
+    }
+  }, once = TRUE)
+
+  rotate_tick <- reactiveVal(0)
+  observeEvent(input$auto_rotate, {
+    if (!isTRUE(input$auto_rotate)) rotate_tick(0)
+  })
+
+  observe({
+    req(isTRUE(input$auto_rotate))
+    invalidateLater(ROTATE_SECONDS * 1000)
+    n <- isolate(rotate_tick()) + 1
+    rotate_tick(n)
+    if (n == 1) return()   # first fire happens straight away -- skip it
+    current  <- isolate(input$main_nav)
+    idx      <- match(current, ROTATE_TABS)
+    next_tab <- if (is.na(idx)) ROTATE_TABS[1] else ROTATE_TABS[idx %% length(ROTATE_TABS) + 1]
+    nav_select("main_nav", selected = next_tab)
+  })
 
   # ---- Poll KoboToolbox on a timer ----
   live_data <- reactivePoll(
