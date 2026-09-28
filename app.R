@@ -27,6 +27,8 @@
 #   5. Overview: "Still in A&E" card removed; the "Trend over time" chart is
 #      replaced by a table of Form 1 Q14 (main blockage this shift) with its
 #      own Health Facility filter. Needs the updated kobo_connect.R.
+#   6. Q14 table gets a week filter (defaults to the current running week);
+#      every bar chart now shows its value on top of / inside each bar.
 # ==============================================================================
 
 library(shiny)
@@ -120,6 +122,14 @@ band_theme <- function(mkey, v) {
   )
 }
 
+# Number shown on top of each bar: whole numbers as-is, decimals to 1 place.
+bar_label <- function(v) {
+  ifelse(is.na(v), "",
+         ifelse(v == round(v),
+                formatC(round(v), format = "d", big.mark = ","),
+                formatC(v, format = "f", digits = 1, big.mark = ",")))
+}
+
 # Weeks run Sunday -> Saturday (lubridate: 7 = Sunday).
 WEEK_START_DAY <- 7
 
@@ -185,9 +195,11 @@ ui <- page_navbar(
         card_header(
           div(class = "d-flex justify-content-between align-items-center",
               span("Main blockage this shift (Form 1 Q14)"),
-              selectInput("blockage_facility", NULL,
-                          choices = c("All Facilities", facility_choices),
-                          selected = "All Facilities", width = "220px"))
+              div(class = "d-flex gap-2",
+                  selectInput("blockage_week", NULL, choices = NULL, width = "210px"),
+                  selectInput("blockage_facility", NULL,
+                              choices = c("All Facilities", facility_choices),
+                              selected = "All Facilities", width = "200px")))
         ),
         DTOutput("blockage_table")
       )
@@ -440,8 +452,32 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(plotly_empty(type = "bar") |> layout(title = "No data for current filters"))
     m <- compute_metric(df, "facility", input$overview_metric_facility)
     lbl <- metrics_list[[input$overview_metric_facility]]$label
-    plot_ly(m, x = ~facility, y = ~value, type = "bar") |>
+    plot_ly(m, x = ~facility, y = ~value, type = "bar",
+            text = ~bar_label(value), textposition = "outside", cliponaxis = FALSE) |>
       layout(xaxis = list(title = ""), yaxis = list(title = lbl))
+  })
+
+  # ---- Overview: week picker for the Q14 table ----
+  # Defaults to the CURRENT running week (Sunday to today). The user's pick
+  # is kept across refreshes; if they're on the default, it moves forward
+  # when a new week starts.
+  last_blockage_default <- reactiveVal(NULL)
+
+  observeEvent(f1_filtered(), {
+    df <- f1_filtered()
+    this_wk <- week_of(Sys.Date())
+    data_wks <- if (nrow(df) > 0) unique(week_of(df$date[!is.na(df$date)])) else as.Date(character(0))
+    weeks <- sort(unique(c(this_wk, data_wks)), decreasing = TRUE)
+    labels <- ifelse(weeks == this_wk, paste0("This week (", week_label(weeks), ")"), week_label(weeks))
+    choices <- c(setNames(as.character(weeks), labels), "All weeks" = "all")
+
+    default_wk <- as.character(this_wk)
+    current    <- input$blockage_week
+    on_default <- is.null(current) || current == "" || identical(current, last_blockage_default())
+    selected   <- if (!on_default && current %in% choices) current else default_wk
+
+    updateSelectInput(session, "blockage_week", choices = choices, selected = selected)
+    last_blockage_default(default_wk)
   })
 
   # ---- Overview: Form 1 Q14 "main blockage" free-text table ----
@@ -449,12 +485,17 @@ server <- function(input, output, session) {
   # sidebar Shift/Date filters, plus its own facility dropdown in the card.
   output$blockage_table <- renderDT({
     df <- f1_filtered()
-    empty_msg <- datatable(data.frame(Message = "No blockage notes for current filters"),
+    empty_msg <- datatable(data.frame(Message = "No blockage notes for this week / facility yet"),
                            rownames = FALSE, options = list(dom = "t"))
     if (nrow(df) == 0 || !"main_blockage" %in% names(df)) return(empty_msg)
 
     if (!is.null(input$blockage_facility) && input$blockage_facility != "All Facilities") {
       df <- df %>% filter(facility == input$blockage_facility)
+    }
+    if (!is.null(input$blockage_week) && input$blockage_week != "" &&
+        input$blockage_week != "all") {
+      wk <- as_date(input$blockage_week)
+      df <- df %>% filter(date >= wk, date <= wk + 6)
     }
     df <- df %>%
       mutate(main_blockage = trimws(main_blockage),
@@ -630,7 +671,8 @@ server <- function(input, output, session) {
     df <- focus_data()
     if (nrow(df) == 0) return(plotly_empty(type = "bar") |> layout(title = "No data"))
     df <- df %>% count(shift)
-    plot_ly(df, x = ~shift, y = ~n, type = "bar") |>
+    plot_ly(df, x = ~shift, y = ~n, type = "bar",
+            text = ~n, textposition = "outside", cliponaxis = FALSE) |>
       layout(xaxis = list(title = ""), yaxis = list(title = "Shifts logged"))
   })
 
@@ -652,7 +694,8 @@ server <- function(input, output, session) {
       tidyr::separate_rows(trigger_combined, sep = ",\\s*") %>%
       filter(trigger_combined != "") %>%
       count(trigger_combined, sort = TRUE)
-    plot_ly(counts, x = ~n, y = ~reorder(trigger_combined, n), type = "bar", orientation = "h") |>
+    plot_ly(counts, x = ~n, y = ~reorder(trigger_combined, n), type = "bar", orientation = "h",
+            text = ~n, textposition = "outside", cliponaxis = FALSE) |>
       layout(xaxis = list(title = "Cases"), yaxis = list(title = ""))
   })
 
@@ -660,8 +703,13 @@ server <- function(input, output, session) {
     df <- f2_filtered()
     if (nrow(df) == 0) return(plotly_empty(type = "bar") |> layout(title = "No triggered cases for current filters"))
     df <- df %>% count(category, triage_category)
+    totals <- df %>% group_by(category) %>% summarise(n = sum(n), .groups = "drop")
     plot_ly(df, x = ~category, y = ~n, color = ~triage_category, type = "bar",
+            text = ~n, textposition = "inside", insidetextanchor = "middle",
             colors = c("Red" = "#d62728", "Yellow" = "#f0ad4e", "Green" = "#5cb85c")) |>
+      add_trace(data = totals, x = ~category, y = ~n, type = "scatter", mode = "text",
+                text = ~paste0("<b>", n, "</b>"), textposition = "top center",
+                showlegend = FALSE, inherit = FALSE, hoverinfo = "skip") |>
       layout(barmode = "stack", xaxis = list(title = ""), yaxis = list(title = "Cases"))
   })
 
@@ -707,7 +755,8 @@ server <- function(input, output, session) {
     df <- f3_filtered()
     if (nrow(df) == 0) return(plotly_empty(type = "bar") |> layout(title = "No patient-flow records for current filters"))
     df <- df %>% count(diagnosis) %>% arrange(desc(n))
-    plot_ly(df, x = ~n, y = ~reorder(diagnosis, n), type = "bar", orientation = "h") |>
+    plot_ly(df, x = ~n, y = ~reorder(diagnosis, n), type = "bar", orientation = "h",
+            text = ~n, textposition = "outside", cliponaxis = FALSE) |>
       layout(xaxis = list(title = "Patients"), yaxis = list(title = ""))
   })
 
