@@ -221,9 +221,11 @@ ui <- page_navbar(
       col_widths = c(4, 8),
       card(
         card_header("Focus facility"),
-        selectInput("focus_facility", NULL, choices = facility_choices, selected = facility_choices[1]),
+        selectInput("focus_facility", NULL,
+                    choices = c("All Facilities", facility_choices),
+                    selected = "All Facilities"),
         p(class = "text-muted small",
-          "Shows this facility's own KPI trend against the filters selected in the sidebar.")
+          "Shows the KPI trend for all facilities combined, or pick one facility to see its own trend. Uses the Shift/Date filters in the sidebar.")
       ),
       card(
         card_header("Shifts logged"),
@@ -601,8 +603,17 @@ server <- function(input, output, session) {
   })
 
   # ---- Facility Trends tab ----
+  # "All Facilities" (the default) pools every facility; otherwise filter
+  # to the one chosen.
+  focus_data <- reactive({
+    req(input$focus_facility)
+    df <- f1_filtered()
+    if (nrow(df) == 0 || input$focus_facility == "All Facilities") return(df)
+    df %>% filter(facility == input$focus_facility)
+  })
+
   output$focus_shift_count <- renderPlotly({
-    df <- f1_filtered() %>% filter(facility == input$focus_facility)
+    df <- focus_data()
     if (nrow(df) == 0) return(plotly_empty(type = "bar") |> layout(title = "No data"))
     df <- df %>% count(shift)
     plot_ly(df, x = ~shift, y = ~n, type = "bar") |>
@@ -611,7 +622,7 @@ server <- function(input, output, session) {
 
   output$focus_trend_chart <- renderPlotly({
     req(input$focus_metric)
-    df <- f1_filtered() %>% filter(facility == input$focus_facility)
+    df <- focus_data()
     if (nrow(df) == 0) return(plotly_empty(type = "scatter") |> layout(title = "No data"))
     m <- compute_metric(df, "date", input$focus_metric)
     lbl <- metrics_list[[input$focus_metric]]$label
