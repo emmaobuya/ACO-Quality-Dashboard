@@ -102,6 +102,21 @@ WEEKLY_SIGNAL_META <- list(
   preventable_count   = list(icon = "triangle-exclamation",        direction = "down_is_good")
 )
 
+# Fixed colour bands, used when a week has no earlier week to compare with.
+# Same cut-offs as the Overview cards; edit the numbers here if needed.
+#   green  = "success", amber = "warning", red = "danger"
+band_theme <- function(mkey, v) {
+  if (is.na(v)) return("secondary")
+  switch(mkey,
+    total_deaths       = if (v == 0) "success" else "danger",
+    lwbs_rate          = if (v < 5)  "success" else if (v < 10) "warning" else "danger",
+    sepsis_bundle_rate = if (v >= 90) "success" else if (v >= 70) "warning" else "danger",
+    # counts of delays / failures / preventable cases: none = green,
+    # a few = amber, more than 5 in a week = red
+    if (v == 0) "success" else if (v <= 5) "warning" else "danger"
+  )
+}
+
 # Weeks run Sunday -> Saturday (lubridate: 7 = Sunday).
 WEEK_START_DAY <- 7
 
@@ -129,7 +144,10 @@ shift_choices <- unname(shift_lookup)
 ui <- page_navbar(
   title = "ACO Dashboard (Live)",
   theme = bs_theme(version = 5, bootswatch = "flatly"),
-  fillable = TRUE,
+  # FALSE so cards keep their natural height -- with TRUE, the Weekly
+  # Signals tab squashed the week selector, trend chart and table into
+  # thin empty bars once the placards were added.
+  fillable = FALSE,
 
   sidebar = sidebar(
     width = 280,
@@ -533,7 +551,8 @@ server <- function(input, output, session) {
         theme_color <- "secondary"
         change_text <- "No data this week"
       } else if (is.na(prev)) {
-        theme_color <- if (meta$direction == "neutral") "info" else "secondary"
+        # No earlier week to compare with -> fall back to fixed colour bands
+        theme_color <- if (meta$direction == "neutral") "info" else band_theme(mkey, cur)
         change_text <- "No prior week to compare"
       } else {
         delta <- cur - prev
