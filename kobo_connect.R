@@ -1,5 +1,5 @@
 # ==============================================================================
-# ECO -- Live KoboToolbox connection
+# ACO -- Live KoboToolbox connection
 # Updated: field names re-verified against XLSForm a2uByyb4iqMzEXp8cBZfBh (2026-09-07)
 #
 # Changes from previous version:
@@ -17,6 +17,9 @@
 #      names and returning nothing. All re-mapped to the current form.
 #   7. Added new _5b_ "patients on ward at end of shift" field.
 #   8. load_live_data() has safe fallback — app never crashes on API failure
+#   9. (2026-09-28) Added Form 1 Q14 "main blockage" free text as
+#      `main_blockage` (internal name _16_In_one_line_wha_focus_not_a_person),
+#      shown in a table on the Overview tab.
 # ==============================================================================
 
 library(curl)
@@ -198,6 +201,11 @@ parse_kobo_data <- function(raw) {
     sepsis_bundle <- safe_num(find_field(rec, "_13_How_many_sepsis_bundle_wit"))
     sepsis_no_abx <- safe_num(find_field(rec, "_12_How_many_sepsis_iotics_wit"))
     prev_raw      <- find_field(rec, "_22_Were_there_any_cases_this_")
+    # Q14 "In one line, what was the main blockage today (system focus, not
+    # a person)?" -- internal name starts _16_ but it is question 14.
+    blockage_raw  <- find_field(rec, "_16_In_one_line_wha_focus_not_a_person")
+    main_blockage <- if (is.null(blockage_raw) || length(blockage_raw) == 0 ||
+                         is.na(blockage_raw)) NA_character_ else as.character(blockage_raw)
 
     form1_rows[[length(form1_rows) + 1]] <- data.frame(
       uuid                    = as.character(root_uuid),
@@ -223,6 +231,7 @@ parse_kobo_data <- function(raw) {
       yellow_delay_2h         = safe_num(find_field(rec, "_18_How_many_Yellow_seen_by_a_")),
       preventable_flag        = identical(decode_choice(prev_raw, yesno_lookup), "Yes"),
       preventable_count       = safe_num(find_field(rec, "_20_If_Yes_how_many_such_cases")),
+      main_blockage           = main_blockage,
       stringsAsFactors = FALSE
     )
 
@@ -306,4 +315,3 @@ load_live_data <- function() {
   warning("Returning empty data -- check KOBO_TOKEN and ASSET_UID env vars")
   list(form1 = data.frame(), form2 = data.frame(), form3 = data.frame())
 }
-
