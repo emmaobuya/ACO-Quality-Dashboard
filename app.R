@@ -7,6 +7,23 @@
 # BEFORE RUNNING: open kobo_connect.R and set KOBO_TOKEN to your own API
 # token (Kobo -> Account Settings -> API). KOBO_SERVER and ASSET_UID are
 # already filled in for this form.
+#
+# Changes in this version (2026-09-28):
+#   1. FIXED deaths under-count: the "Total deaths" card now sums Form 1
+#      Q8 (_8_a_How_many_patinets_died), which every shift submission
+#      answers. It used to count Form 3 rows with outcome "Died", but the
+#      Form 3 repeat is NOT shown when deaths are the only thing reported
+#      (its relevance rule doesn't include Q8), so most deaths never
+#      reached Form 3.
+#   2. FIXED stale date filter: the sidebar end date used to be set once at
+#      start-up, so anything submitted afterwards (or dated after the
+#      latest record at start-up) was silently filtered out. The end date
+#      now follows new data automatically unless you change it yourself.
+#   3. Weekly Signals now uses Sunday-Saturday weeks and opens on the
+#      previous complete week by default (e.g. on Mon 28 Sep 2026 it shows
+#      20-26 Sep 2026).
+#   4. Weekly Signals: "Death rate (%)" replaced by the number of deaths
+#      recorded that week (sum of Form 1 Q8, _8_a_How_many_patinets_died).
 # ==============================================================================
 
 library(shiny)
@@ -25,7 +42,7 @@ source("kobo_connect.R")   # config, fetch, parse -- see that file for details
 metrics_list <- list(
   submissions        = list(label = "Number of submissions", type = "count"),
   patients_seen      = list(label = "Total patients seen", type = "sum"),
-  total_deaths       = list(label = "Total deaths", type = "sum"),
+  total_deaths       = list(label = "Deaths recorded (Form 1 Q8)", type = "sum"),
   death_rate         = list(label = "Death rate (%)", type = "rate",
                              numerator = "total_deaths", denominator = "patients_seen"),
   lwbs_rate          = list(label = "LWBS rate (%)", type = "rate",
@@ -64,9 +81,9 @@ compute_metric <- function(df, group_vars, metric_key) {
 # Weekly Signals shows this fixed set of key KPIs side by side, one column
 # per metric, one row per week -- easier to scan for a sudden shift than
 # picking through metrics one at a time.
-WEEKLY_SIGNAL_METRICS <- c("submissions", "patients_seen", "death_rate", "lwbs_rate",
-                            "sepsis_bundle_rate", "red_delay_60min", "yellow_delay_2h",
-                            "equipment_failures", "preventable_count")
+WEEKLY_SIGNAL_METRICS <- c("submissions", "patients_seen", "total_deaths",
+                            "lwbs_rate", "sepsis_bundle_rate", "red_delay_60min",
+                            "yellow_delay_2h", "equipment_failures", "preventable_count")
 
 # Icon + direction metadata for the Weekly Signals placards.
 # direction controls how a week-over-week change is colored:
@@ -76,14 +93,26 @@ WEEKLY_SIGNAL_METRICS <- c("submissions", "patients_seen", "death_rate", "lwbs_r
 WEEKLY_SIGNAL_META <- list(
   submissions         = list(icon = "clipboard-list",              direction = "neutral"),
   patients_seen       = list(icon = "users",                       direction = "neutral"),
-  death_rate          = list(icon = "heart-pulse",                 direction = "down_is_good"),
+  total_deaths        = list(icon = "heart-pulse",                 direction = "down_is_good"),
   lwbs_rate           = list(icon = "person-walking-arrow-right",  direction = "down_is_good"),
   sepsis_bundle_rate  = list(icon = "syringe",                     direction = "up_is_good"),
-  red_delay_60min     = list(icon = "hourglass-half",               direction = "down_is_good"),
+  red_delay_60min     = list(icon = "hourglass-half",              direction = "down_is_good"),
   yellow_delay_2h     = list(icon = "clock",                       direction = "down_is_good"),
   equipment_failures  = list(icon = "screwdriver-wrench",          direction = "down_is_good"),
   preventable_count   = list(icon = "triangle-exclamation",        direction = "down_is_good")
 )
+
+# Weeks run Sunday -> Saturday (lubridate: 7 = Sunday).
+WEEK_START_DAY <- 7
+
+week_of <- function(d) floor_date(d, "week", week_start = WEEK_START_DAY)
+
+# The previous complete week, e.g. on Mon 28 Sep 2026 -> Sun 20 Sep 2026.
+previous_week_start <- function(today = Sys.Date()) week_of(today) - 7
+
+week_label <- function(ws) {
+  paste0(format(ws, "%d %b"), " – ", format(ws + 6, "%d %b %Y"))
+}
 
 # Shift ordering within a day, used to determine "the previous shift"
 # chronologically (a plain date sort alone can't tell Morning from Night).
@@ -145,7 +174,7 @@ ui <- page_navbar(
   nav_panel(
     "Weekly Signals",
     p(class = "text-muted small",
-      "Key KPIs rolled up by week (Monday-starting), using the sidebar's Facility/Shift/Date filters. Pick a week to see its placards; each one shows the change from the week before."),
+      "Key KPIs rolled up by week (Sunday to Saturday), using the sidebar's Facility/Shift/Date filters. Opens on the previous complete week; pick another week to see its placards. Each placard shows the change from the week before."),
     layout_columns(
       col_widths = c(3, 9),
       card(
@@ -254,15 +283,36 @@ server <- function(input, output, session) {
            " -- ", nrow(d$form1), " shift record(s) loaded")
   })
 
-  # One-time: once real data arrives, widen the date filter to cover it
+  # ---- Keep the sidebar date range in step with the data ----
+  # Previously this ran once at start-up, so the end date froze at whatever
+  # the latest record was then, and every later submission fell outside the
+  # filter. Now, on every refresh, the range is widened to cover new data --
+  # unless the user has set their own dates (we only move an edge that is
+  # still sitting where the dashboard last put it).
+  auto_range <- reactiveVal(NULL)
+
   observeEvent(live_data(), {
     df <- live_data()$form1
-    if (nrow(df) > 0) {
-      updateDateRangeInput(session, "f_dates",
-                            start = min(df$date, na.rm = TRUE),
-                            end = max(df$date, na.rm = TRUE))
+    if (nrow(df) == 0 || all(is.na(df$date))) return()
+
+    new_start <- min(df$date, na.rm = TRUE)
+    new_end   <- max(Sys.Date(), max(df$date, na.rm = TRUE))
+    prev      <- auto_range()
+    cur       <- input$f_dates
+
+    if (is.null(prev)) {
+      updateDateRangeInput(session, "f_dates", start = new_start, end = new_end)
+    } else {
+      start_untouched <- !is.null(cur) && !is.na(cur[1]) && cur[1] == prev[1]
+      end_untouched   <- !is.null(cur) && !is.na(cur[2]) && cur[2] == prev[2]
+      updateDateRangeInput(
+        session, "f_dates",
+        start = if (start_untouched) new_start else cur[1],
+        end   = if (end_untouched)   new_end   else cur[2]
+      )
     }
-  }, once = TRUE)
+    auto_range(c(new_start, new_end))
+  })
 
   # ---- Filtered datasets, reactive to sidebar + live data ----
   f1_filtered <- reactive({
@@ -298,25 +348,26 @@ server <- function(input, output, session) {
   })
 
   # ---- Overview KPIs ----
-  # Total submissions and patients seen come from Form 1 (the per-shift
-  # tally). Still-in-A&E, deaths, and LWBS now come from Form 3 instead --
-  # it's one row per patient with an actual 24h outcome, so it's a more
-  # reliable count than the shift-level tally questions in Form 1.
-  # Colors carry meaning: green/amber/red thresholds on the metrics that
-  # have a clear good/bad direction; neutral accents on pure volume metrics.
+  # Total submissions, patients seen and TOTAL DEATHS come from Form 1 (the
+  # per-shift tally that every submission fills in). Deaths used to be
+  # counted from Form 3 outcomes, but Form 3 only opens when some other
+  # trigger is > 0 -- a shift reporting deaths alone never reaches Form 3 --
+  # so that count was far too low.
+  # Still-in-A&E and LWBS still come from Form 3 (one row per patient).
   output$overview_kpis <- renderUI({
     df <- f1_filtered()
     f3 <- f3_filtered()
 
     total_submissions <- nrow(df)
     patients <- if (nrow(df) == 0) NA_real_ else sum(df$patients_seen, na.rm = TRUE)
+    died_n   <- if (nrow(df) == 0) NA_real_ else sum(df$total_deaths, na.rm = TRUE)
+    death_rate <- if (is.na(patients) || patients == 0) NA_real_ else 100 * died_n / patients
 
     f3_total <- nrow(f3)
     outcome_n   <- function(label) if (f3_total == 0) NA_real_ else sum(f3$outcome_24h == label, na.rm = TRUE)
     outcome_pct <- function(n) if (f3_total == 0 || is.na(n)) NA_real_ else 100 * n / f3_total
 
     still_ae_n <- outcome_n("Still in A&E")
-    died_n     <- outcome_n("Died")
     lwbs_n     <- outcome_n("LWBS")
     still_ae_pct <- outcome_pct(still_ae_n)
     lwbs_pct     <- outcome_pct(lwbs_n)
@@ -330,6 +381,11 @@ server <- function(input, output, session) {
     subtitle <- function(pct, label) {
       if (is.na(pct)) p(class = "text-muted small", paste0("No ", label, " data")) else
         p(class = "text-muted small", paste0(round(pct, 1), "% of Form 3 patients"))
+    }
+    death_subtitle <- if (is.na(death_rate)) {
+      p(class = "text-muted small", "No patients-seen data")
+    } else {
+      p(class = "text-muted small", paste0(round(death_rate, 1), "% of patients seen (Form 1)"))
     }
 
     # Threshold-based coloring
@@ -349,7 +405,7 @@ server <- function(input, output, session) {
                 subtitle(still_ae_pct, "outcome")),
       value_box(title = "Total deaths", value = fmt_int(died_n),
                 showcase = icon("heart-pulse"), theme = deaths_theme,
-                subtitle(outcome_pct(died_n), "outcome")),
+                death_subtitle),
       value_box(title = "LWBS (24h)", value = fmt_int(lwbs_n),
                 showcase = icon("person-walking-arrow-right"), theme = lwbs_theme,
                 subtitle(lwbs_pct, "outcome")),
@@ -384,44 +440,68 @@ server <- function(input, output, session) {
   weekly_data <- reactive({
     df <- f1_filtered()
     if (nrow(df) == 0) return(df)
-    df %>% mutate(week_start = floor_date(date, "week", week_start = 1))
+    df %>% mutate(week_start = week_of(date))
   })
 
   # All-metric summary table, one row per week -- computed once and reused
-  # by both the placards and the table below, so they always agree.
+  # by the placards and the table, so they always agree. Covers every week
+  # from the first with data up to the previous complete week, so the
+  # default week always exists even if it had no submissions (counts show 0).
   weekly_summary <- reactive({
     df <- weekly_data()
     if (nrow(df) == 0) return(NULL)
-    weeks <- sort(unique(df$week_start))
+    first_wk <- min(df$week_start, na.rm = TRUE)
+    last_wk  <- max(df$week_start, na.rm = TRUE)
+    # Include the previous complete week even if nothing was submitted in
+    # it -- but only when it falls inside the sidebar date range.
+    prev_wk <- previous_week_start()
+    if (prev_wk + 6 >= input$f_dates[1] && prev_wk <= input$f_dates[2]) {
+      last_wk <- max(last_wk, prev_wk)
+    }
+    weeks <- seq(first_wk, last_wk, by = "week")
     out <- data.frame(week_start = weeks)
     for (mkey in WEEKLY_SIGNAL_METRICS) {
       m <- compute_metric(df, "week_start", mkey)
-      out[[mkey]] <- m$value[match(weeks, m$week_start)]
+      vals <- m$value[match(weeks, m$week_start)]
+      if (metrics_list[[mkey]]$type != "rate") vals[is.na(vals)] <- 0
+      out[[mkey]] <- vals
     }
     out
   })
 
-  # Populate the week selector once data is available; default to the most
-  # recent week. Re-populate (without resetting the user's choice where
-  # possible) whenever the set of available weeks changes.
+  # Week selector: defaults to the previous complete Sunday-Saturday week.
+  # If the user picks another week we keep it across refreshes; if they are
+  # still on the default, we move them to the new default when the week
+  # rolls over.
+  last_default_week <- reactiveVal(NULL)
+
   observeEvent(weekly_summary(), {
     ws <- weekly_summary()
     if (is.null(ws) || nrow(ws) == 0) return()
     weeks <- sort(ws$week_start, decreasing = TRUE)
-    choices <- setNames(as.character(weeks), format(weeks, "Week of %d %b %Y"))
-    current <- input$weekly_week
-    selected <- if (!is.null(current) && current %in% choices) current else choices[[1]]
+    choices <- setNames(as.character(weeks), week_label(weeks))
+
+    default_wk <- as.character(previous_week_start())
+    current    <- input$weekly_week
+    on_default <- is.null(current) || current == "" ||
+                  identical(current, last_default_week())
+
+    selected <- if (!on_default && current %in% choices) current
+                else if (default_wk %in% choices) default_wk
+                else unname(choices[[1]])
     updateSelectInput(session, "weekly_week", choices = choices, selected = selected)
+    last_default_week(default_wk)
   })
 
   output$weekly_trend_chart <- renderPlotly({
     req(input$weekly_metric)
+    ws <- weekly_summary()
+    if (is.null(ws)) return(plotly_empty(type = "scatter") |> layout(title = "No data for current filters"))
     df <- weekly_data()
-    if (nrow(df) == 0) return(plotly_empty(type = "scatter") |> layout(title = "No data for current filters"))
     m <- compute_metric(df, "week_start", input$weekly_metric)
     lbl <- metrics_list[[input$weekly_metric]]$label
     plot_ly(m, x = ~week_start, y = ~value, type = "scatter", mode = "lines+markers") |>
-      layout(xaxis = list(title = "Week starting"), yaxis = list(title = lbl))
+      layout(xaxis = list(title = "Week starting (Sunday)"), yaxis = list(title = lbl))
   })
 
   # ---- Weekly Signals: colored KPI placards for the selected week ----
@@ -434,14 +514,14 @@ server <- function(input, output, session) {
     ws <- ws %>% arrange(week_start)
     row_idx <- match(sel_week, ws$week_start)
     if (is.na(row_idx)) return(NULL)
-    prev_idx <- row_idx - 1  # NA if this is the first week on record
+    prev_idx <- row_idx - 1  # 0 if this is the first week on record
 
     boxes <- lapply(WEEKLY_SIGNAL_METRICS, function(mkey) {
       meta   <- WEEKLY_SIGNAL_META[[mkey]]
       lbl    <- metrics_list[[mkey]]$label
       is_pct <- metrics_list[[mkey]]$type == "rate"
       cur    <- ws[[mkey]][row_idx]
-      prev   <- if (!is.na(prev_idx) && prev_idx >= 1) ws[[mkey]][prev_idx] else NA
+      prev   <- if (prev_idx >= 1) ws[[mkey]][prev_idx] else NA
 
       fmt <- function(v) {
         if (is.na(v)) return("--")
@@ -465,7 +545,7 @@ server <- function(input, output, session) {
           improved <- if (meta$direction == "down_is_good") delta < 0 else delta > 0
           worsened <- if (meta$direction == "down_is_good") delta > 0 else delta < 0
           theme_color <- if (delta == 0) "secondary" else if (improved) "success" else "danger"
-          arrow <- if (delta == 0) "minus" else if (worsened) "arrow-up" else "arrow-down"
+          arrow <- if (delta == 0) "minus" else if (delta > 0) "arrow-up" else "arrow-down"
           change_text <- paste0(icon(arrow), " ", fmt(abs(delta)), " vs last week")
         }
       }
@@ -480,25 +560,25 @@ server <- function(input, output, session) {
     })
 
     tagList(
-      h6(class = "mt-3 text-muted", format(sel_week, "Placards for week of %d %b %Y")),
-      do.call(layout_columns, c(list(col_widths = c(4, 4, 4, 4, 4, 4, 4, 4, 4)), boxes))
+      h6(class = "mt-3 text-muted", paste0("Placards for ", week_label(sel_week))),
+      do.call(layout_columns, c(list(col_widths = rep(4, length(boxes))), boxes))
     )
   })
 
   output$weekly_signals_table <- renderDT({
-    df <- weekly_data()
-    if (nrow(df) == 0) {
+    ws <- weekly_summary()
+    if (is.null(ws) || nrow(ws) == 0) {
       return(datatable(data.frame(Message = "No data for current filters"), rownames = FALSE))
     }
-    weeks <- sort(unique(df$week_start))
-    out <- data.frame(Week = format(weeks, "%d %b %Y"))
+    ws <- ws %>% arrange(desc(week_start))
+    out <- data.frame(Week = week_label(ws$week_start))
     for (mkey in WEEKLY_SIGNAL_METRICS) {
-      m <- compute_metric(df, "week_start", mkey)
-      lbl <- metrics_list[[mkey]]$label
-      vals <- m$value[match(weeks, m$week_start)]
+      lbl  <- metrics_list[[mkey]]$label
+      vals <- ws[[mkey]]
       out[[lbl]] <- if (metrics_list[[mkey]]$type == "rate") round(vals, 1) else vals
     }
-    datatable(out, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
+    datatable(out, options = list(pageLength = 15, scrollX = TRUE, ordering = FALSE),
+              rownames = FALSE)
   })
 
   # ---- Facility Trends tab ----
