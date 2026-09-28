@@ -210,19 +210,14 @@ ui <- page_navbar(
     "Weekly Signals",
     p(class = "text-muted small",
       "Key KPIs rolled up by week (Sunday to Saturday), using the sidebar's Facility/Shift/Date filters. Opens on the previous complete week; pick another week to see its placards. Each placard shows the change from the week before."),
-    layout_columns(
-      col_widths = c(3, 9),
-      card(
-        card_header("Select Week"),
-        selectInput("weekly_week", NULL, choices = NULL, width = "100%"),
-        p(class = "text-muted small",
-          "Placard colors: green = improved vs last week, red = worsened, gray = no meaningful change. Submissions and patients seen are volume only, shown in blue."),
-        hr(),
-        selectInput("weekly_metric", "Trend chart metric", choices = metric_choices, width = "100%")
-      ),
-      card(
-        card_header("Weekly Trend"),
-        plotlyOutput("weekly_trend_chart", height = "300px")
+    card(
+      card_body(
+        div(class = "d-flex flex-wrap align-items-center gap-3",
+            strong("Select week:"),
+            selectInput("weekly_week", NULL, choices = NULL, width = "260px"),
+            span(class = "text-muted small",
+                 "Placard colors: green = improved vs last week, red = worsened, gray = no change. Submissions and patients seen are volume only, shown in blue.")
+        )
       )
     ),
     uiOutput("weekly_placards"),
@@ -566,17 +561,6 @@ server <- function(input, output, session) {
                 else unname(choices[[1]])
     updateSelectInput(session, "weekly_week", choices = choices, selected = selected)
     last_default_week(default_wk)
-  })
-
-  output$weekly_trend_chart <- renderPlotly({
-    req(input$weekly_metric)
-    ws <- weekly_summary()
-    if (is.null(ws)) return(plotly_empty(type = "scatter") |> layout(title = "No data for current filters"))
-    df <- weekly_data()
-    m <- compute_metric(df, "week_start", input$weekly_metric)
-    lbl <- metrics_list[[input$weekly_metric]]$label
-    plot_ly(m, x = ~week_start, y = ~value, type = "scatter", mode = "lines+markers") |>
-      layout(xaxis = list(title = "Week starting (Sunday)"), yaxis = list(title = lbl))
   })
 
   # ---- Weekly Signals: colored KPI placards for the selected week ----
