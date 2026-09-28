@@ -24,6 +24,9 @@
 #      20-26 Sep 2026).
 #   4. Weekly Signals: "Death rate (%)" replaced by the number of deaths
 #      recorded that week (sum of Form 1 Q8, _8_a_How_many_patinets_died).
+#   5. Overview: "Still in A&E" card removed; the "Trend over time" chart is
+#      replaced by a table of Form 1 Q14 (main blockage this shift) with its
+#      own Health Facility filter. Needs the updated kobo_connect.R.
 # ==============================================================================
 
 library(shiny)
@@ -181,10 +184,12 @@ ui <- page_navbar(
       card(
         card_header(
           div(class = "d-flex justify-content-between align-items-center",
-              span("Trend over time"),
-              selectInput("overview_metric_trend", NULL, choices = metric_choices, width = "260px"))
+              span("Main blockage this shift (Form 1 Q14)"),
+              selectInput("blockage_facility", NULL,
+                          choices = c("All Facilities", facility_choices),
+                          selected = "All Facilities", width = "220px"))
         ),
-        plotlyOutput("trend_chart", height = "320px")
+        DTOutput("blockage_table")
       )
     )
   ),
@@ -373,7 +378,7 @@ server <- function(input, output, session) {
   # counted from Form 3 outcomes, but Form 3 only opens when some other
   # trigger is > 0 -- a shift reporting deaths alone never reaches Form 3 --
   # so that count was far too low.
-  # Still-in-A&E and LWBS still come from Form 3 (one row per patient).
+  # LWBS still comes from Form 3 (one row per patient).
   output$overview_kpis <- renderUI({
     df <- f1_filtered()
     f3 <- f3_filtered()
@@ -387,10 +392,8 @@ server <- function(input, output, session) {
     outcome_n   <- function(label) if (f3_total == 0) NA_real_ else sum(f3$outcome_24h == label, na.rm = TRUE)
     outcome_pct <- function(n) if (f3_total == 0 || is.na(n)) NA_real_ else 100 * n / f3_total
 
-    still_ae_n <- outcome_n("Still in A&E")
-    lwbs_n     <- outcome_n("LWBS")
-    still_ae_pct <- outcome_pct(still_ae_n)
-    lwbs_pct     <- outcome_pct(lwbs_n)
+    lwbs_n   <- outcome_n("LWBS")
+    lwbs_pct <- outcome_pct(lwbs_n)
 
     sepsis_tot  <- if (nrow(df) == 0) NA_real_ else sum(df$sepsis_cases, na.rm = TRUE)
     sepsis_rate <- if (is.na(sepsis_tot) || sepsis_tot == 0) NA_real_ else
@@ -410,19 +413,15 @@ server <- function(input, output, session) {
 
     # Threshold-based coloring
     deaths_theme   <- if (is.na(died_n)) "secondary" else if (died_n == 0) "success" else "danger"
-    still_ae_theme <- if (is.na(still_ae_pct)) "secondary" else if (still_ae_pct >= 30) "danger" else if (still_ae_pct >= 15) "warning" else "success"
     lwbs_theme     <- if (is.na(lwbs_pct)) "secondary" else if (lwbs_pct >= 10) "danger" else if (lwbs_pct >= 5) "warning" else "success"
     sepsis_theme   <- if (is.na(sepsis_rate)) "secondary" else if (sepsis_rate >= 90) "success" else if (sepsis_rate >= 70) "warning" else "danger"
 
-    layout_columns(
-      col_widths = c(2, 2, 2, 2, 2, 2),
+    layout_column_wrap(
+      width = 1/5,
       value_box(title = "Total submissions", value = fmt_int(total_submissions),
                 showcase = icon("clipboard-list"), theme = "primary"),
       value_box(title = "Patients seen", value = fmt_int(patients),
                 showcase = icon("users"), theme = "info"),
-      value_box(title = "Still in A&E (24h)", value = fmt_int(still_ae_n),
-                showcase = icon("hospital"), theme = still_ae_theme,
-                subtitle(still_ae_pct, "outcome")),
       value_box(title = "Total deaths", value = fmt_int(died_n),
                 showcase = icon("heart-pulse"), theme = deaths_theme,
                 death_subtitle),
@@ -445,15 +444,30 @@ server <- function(input, output, session) {
       layout(xaxis = list(title = ""), yaxis = list(title = lbl))
   })
 
-  # ---- Overview: trend chart (all facilities, colored) ----
-  output$trend_chart <- renderPlotly({
-    req(input$overview_metric_trend)
+  # ---- Overview: Form 1 Q14 "main blockage" free-text table ----
+  # One row per shift submission that wrote something in Q14. Uses the
+  # sidebar Shift/Date filters, plus its own facility dropdown in the card.
+  output$blockage_table <- renderDT({
     df <- f1_filtered()
-    if (nrow(df) == 0) return(plotly_empty(type = "scatter") |> layout(title = "No data for current filters"))
-    m <- compute_metric(df, c("date", "facility"), input$overview_metric_trend)
-    lbl <- metrics_list[[input$overview_metric_trend]]$label
-    plot_ly(m, x = ~date, y = ~value, color = ~facility, type = "scatter", mode = "lines+markers") |>
-      layout(xaxis = list(title = ""), yaxis = list(title = lbl))
+    empty_msg <- datatable(data.frame(Message = "No blockage notes for current filters"),
+                           rownames = FALSE, options = list(dom = "t"))
+    if (nrow(df) == 0 || !"main_blockage" %in% names(df)) return(empty_msg)
+
+    if (!is.null(input$blockage_facility) && input$blockage_facility != "All Facilities") {
+      df <- df %>% filter(facility == input$blockage_facility)
+    }
+    df <- df %>%
+      mutate(main_blockage = trimws(main_blockage),
+             shift = factor(shift, levels = names(SHIFT_ORDER))) %>%
+      filter(!is.na(main_blockage), main_blockage != "") %>%
+      arrange(desc(date), facility, desc(shift)) %>%
+      select(date, facility, shift, main_blockage)
+    if (nrow(df) == 0) return(empty_msg)
+
+    datatable(df, rownames = FALSE,
+              colnames = c("Date", "Facility", "Shift", "Main blockage"),
+              options = list(pageLength = 6, scrollX = TRUE, scrollY = "260px",
+                             dom = "ftip", ordering = FALSE))
   })
 
   # ---- Weekly Signals tab ----
