@@ -29,8 +29,12 @@
 #      own Health Facility filter. Needs the updated kobo_connect.R.
 #   6. Q14 table gets a week filter (defaults to the current running week);
 #      every bar chart now shows its value on top of / inside each bar.
-#   7. Office-screen mode: tabs rotate every ROTATE_SECONDS (sidebar switch,
+#   7. Office-screen mode: tabs rotate automatically (sidebar switch,
 #      or ?kiosk=1 in the link); page reloads itself after a disconnect.
+#   8. New "KPIs" tab (after Overview): patients seen, deaths, admitted and
+#      submissions for the last 24 hours, plus an auto-scrolling feed of
+#      every Q14 answer by facility. Overview Q14 table now shows the last
+#      24 hours instead of a week picker. Rotation time set per tab.
 # ==============================================================================
 
 library(shiny)
@@ -153,8 +157,18 @@ SHIFT_ORDER <- c("Morning" = 1, "Afternoon" = 2, "Night" = 3)
 # on screen. Turn it on with the "Auto-rotate tabs" switch in the sidebar,
 # or open the dashboard with ?kiosk=1 at the end of the link, which also
 # hides the sidebar -- use that link on the office screen.
-ROTATE_TABS    <- c("Overview", "Weekly Signals", "Facility Trends")
-ROTATE_SECONDS <- 60
+# Seconds per tab -- the KPIs screen gets longer so its Q14 feed can scroll.
+ROTATE_TABS <- c(
+  "Overview"        = 60,
+  "KPIs"            = 120,
+  "Weekly Signals"  = 60,
+  "Facility Trends" = 60
+)
+
+# Window for the KPIs screen and the Q14 tables, based on Kobo submission
+# time; times are shown in Uganda time.
+LAST_HOURS <- 24
+DISPLAY_TZ <- "Africa/Kampala"
 
 # Facility/shift choices come from the form definition, not the data, so the
 # UI can be built before the first API call completes.
@@ -174,7 +188,35 @@ ui <- page_navbar(
     # after 10 seconds instead of leaving a grey screen on the wall.
     tags$script(HTML(
       "$(document).on('shiny:disconnected', function(){ setTimeout(function(){ location.reload(); }, 10000); });"
-    ))
+    )),
+    # Slowly scrolls any .auto-scroll box; pauses 3s at the bottom, jumps
+    # back to the top, pauses 3s, repeats. Stops while the mouse is over it.
+    tags$script(HTML("
+      setInterval(function(){
+        var now = Date.now();
+        document.querySelectorAll('.auto-scroll').forEach(function(el){
+          if (el.matches(':hover')) return;
+          if (el.scrollHeight <= el.clientHeight + 2) return;
+          if (now < +(el.dataset.pauseUntil || 0)) return;
+          if (el.dataset.reset === '1') {
+            el.scrollTop = 0; el.dataset.reset = '0';
+            el.dataset.pauseUntil = now + 3000; return;
+          }
+          el.scrollTop += 1;
+          if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1) {
+            el.dataset.reset = '1'; el.dataset.pauseUntil = now + 3000;
+          }
+        });
+      }, 40);
+    ")),
+    tags$style(HTML("
+      .auto-scroll { height: 58vh; overflow-y: auto; }
+      .feed-facility { font-size: 1.3rem; font-weight: 600; margin: 1rem 0 .4rem;
+                       border-bottom: 2px solid var(--bs-primary); padding-bottom: .2rem; }
+      .feed-item { font-size: 1.15rem; padding: .5rem .75rem; margin-bottom: .4rem;
+                   border-left: 4px solid var(--bs-info); background: var(--bs-light); }
+      .feed-meta { font-size: .9rem; color: var(--bs-secondary); }
+    "))
   ),
   theme = bs_theme(version = 5, bootswatch = "flatly"),
   # FALSE so cards keep their natural height -- with TRUE, the Weekly
@@ -194,8 +236,7 @@ ui <- page_navbar(
     dateRangeInput("f_dates", "Date range",
                     start = Sys.Date() - 90, end = Sys.Date()),
     hr(),
-    checkboxInput("auto_rotate",
-                  paste0("Auto-rotate tabs every ", ROTATE_SECONDS, "s (office screen)"),
+    checkboxInput("auto_rotate", "Auto-rotate tabs (office screen)",
                   value = FALSE),
     hr(),
     textOutput("connection_status"),
@@ -219,15 +260,25 @@ ui <- page_navbar(
       card(
         card_header(
           div(class = "d-flex justify-content-between align-items-center",
-              span("Main blockage this shift (Form 1 Q14)"),
-              div(class = "d-flex gap-2",
-                  selectInput("blockage_week", NULL, choices = NULL, width = "210px"),
-                  selectInput("blockage_facility", NULL,
-                              choices = c("All Facilities", facility_choices),
-                              selected = "All Facilities", width = "200px")))
+              span(paste0("Main blockage \u2013 last ", LAST_HOURS, " hours (Form 1 Q14)")),
+              selectInput("blockage_facility", NULL,
+                          choices = c("All Facilities", facility_choices),
+                          selected = "All Facilities", width = "200px"))
         ),
         DTOutput("blockage_table")
       )
+    )
+  ),
+
+  nav_panel(
+    "KPIs",
+    h5(class = "mt-2 text-muted", textOutput("kpi_window_label", inline = TRUE)),
+    uiOutput("kpi_boxes"),
+    card(
+      class = "mt-3",
+      card_header(paste0("Main blockage by facility \u2013 last ", LAST_HOURS,
+                         " hours (Form 1 Q14)")),
+      div(class = "auto-scroll", uiOutput("kpi_blockage_feed"))
     )
   ),
 
@@ -345,14 +396,19 @@ server <- function(input, output, session) {
 
   observe({
     req(isTRUE(input$auto_rotate))
-    invalidateLater(ROTATE_SECONDS * 1000)
     n <- isolate(rotate_tick()) + 1
     rotate_tick(n)
-    if (n == 1) return()   # first fire happens straight away -- skip it
-    current  <- isolate(input$main_nav)
-    idx      <- match(current, ROTATE_TABS)
-    next_tab <- if (is.na(idx)) ROTATE_TABS[1] else ROTATE_TABS[idx %% length(ROTATE_TABS) + 1]
-    nav_select("main_nav", selected = next_tab)
+    current <- isolate(input$main_nav)
+    tabs    <- names(ROTATE_TABS)
+    if (n == 1) {
+      target <- current            # first fire is immediate -- stay put
+    } else {
+      idx    <- if (is.null(current)) NA else match(current, tabs)
+      target <- if (is.na(idx)) tabs[1] else tabs[idx %% length(tabs) + 1]
+      nav_select("main_nav", selected = target)
+    }
+    secs <- if (!is.null(target) && target %in% tabs) ROTATE_TABS[[target]] else 60
+    invalidateLater(secs * 1000)
   })
 
   # ---- Poll KoboToolbox on a timer ----
@@ -506,58 +562,110 @@ server <- function(input, output, session) {
       layout(xaxis = list(title = ""), yaxis = list(title = lbl))
   })
 
-  # ---- Overview: week picker for the Q14 table ----
-  # Defaults to the CURRENT running week (Sunday to today). The user's pick
-  # is kept across refreshes; if they're on the default, it moves forward
-  # when a new week starts.
-  last_blockage_default <- reactiveVal(NULL)
-
-  observeEvent(f1_filtered(), {
+  # ---- Last-24-hours data (Overview Q14 table + KPIs screen) ----
+  # Based on Kobo submission time, re-checked every 5 minutes so the window
+  # keeps sliding even when no new data arrives. Respects the sidebar
+  # Facility/Shift filters.
+  last_window <- reactive({
+    invalidateLater(5 * 60 * 1000)
     df <- f1_filtered()
-    this_wk <- week_of(Sys.Date())
-    data_wks <- if (nrow(df) > 0) unique(week_of(df$date[!is.na(df$date)])) else as.Date(character(0))
-    weeks <- sort(unique(c(this_wk, data_wks)), decreasing = TRUE)
-    labels <- ifelse(weeks == this_wk, paste0("This week (", week_label(weeks), ")"), week_label(weeks))
-    choices <- c(setNames(as.character(weeks), labels), "All weeks" = "all")
-
-    default_wk <- as.character(this_wk)
-    current    <- input$blockage_week
-    on_default <- is.null(current) || current == "" || identical(current, last_blockage_default())
-    selected   <- if (!on_default && current %in% choices) current else default_wk
-
-    updateSelectInput(session, "blockage_week", choices = choices, selected = selected)
-    last_blockage_default(default_wk)
+    if (nrow(df) == 0) return(df)
+    cutoff <- Sys.time() - LAST_HOURS * 3600
+    df %>%
+      filter(!is.na(submission_time), submission_time >= cutoff) %>%
+      mutate(submitted_local = with_tz(submission_time, DISPLAY_TZ),
+             main_blockage   = trimws(main_blockage))
   })
 
-  # ---- Overview: Form 1 Q14 "main blockage" free-text table ----
-  # One row per shift submission that wrote something in Q14. Uses the
-  # sidebar Shift/Date filters, plus its own facility dropdown in the card.
+  # ---- Overview: Form 1 Q14 "main blockage" table, last 24 hours ----
   output$blockage_table <- renderDT({
-    df <- f1_filtered()
-    empty_msg <- datatable(data.frame(Message = "No blockage notes for this week / facility yet"),
-                           rownames = FALSE, options = list(dom = "t"))
+    df <- last_window()
+    empty_msg <- datatable(
+      data.frame(Message = paste0("No blockage notes in the last ", LAST_HOURS, " hours")),
+      rownames = FALSE, options = list(dom = "t"))
     if (nrow(df) == 0 || !"main_blockage" %in% names(df)) return(empty_msg)
 
     if (!is.null(input$blockage_facility) && input$blockage_facility != "All Facilities") {
       df <- df %>% filter(facility == input$blockage_facility)
     }
-    if (!is.null(input$blockage_week) && input$blockage_week != "" &&
-        input$blockage_week != "all") {
-      wk <- as_date(input$blockage_week)
-      df <- df %>% filter(date >= wk, date <= wk + 6)
-    }
     df <- df %>%
-      mutate(main_blockage = trimws(main_blockage),
-             shift = factor(shift, levels = names(SHIFT_ORDER))) %>%
       filter(!is.na(main_blockage), main_blockage != "") %>%
-      arrange(desc(date), facility, desc(shift)) %>%
-      select(date, facility, shift, main_blockage)
+      arrange(desc(submitted_local)) %>%
+      transmute(submitted = format(submitted_local, "%d %b %H:%M"),
+                facility, shift, main_blockage)
     if (nrow(df) == 0) return(empty_msg)
 
     datatable(df, rownames = FALSE,
-              colnames = c("Date", "Facility", "Shift", "Main blockage"),
+              colnames = c("Submitted", "Facility", "Shift", "Main blockage"),
               options = list(pageLength = 6, scrollX = TRUE, scrollY = "260px",
                              dom = "ftip", ordering = FALSE))
+  })
+
+  # ---- KPIs screen ----
+  output$kpi_window_label <- renderText({
+    invalidateLater(60 * 1000)
+    now <- with_tz(Sys.time(), DISPLAY_TZ)
+    paste0("Last ", LAST_HOURS, " hours: ",
+           format(now - LAST_HOURS * 3600, "%d %b %H:%M"), " \u2013 ",
+           format(now, "%d %b %Y %H:%M"))
+  })
+
+  output$kpi_boxes <- renderUI({
+    df <- last_window()
+    tot <- function(col) if (nrow(df) == 0) 0 else sum(df[[col]], na.rm = TRUE)
+    fmt <- function(v) format(round(v), big.mark = ",")
+
+    patients  <- tot("patients_seen")
+    deaths    <- tot("total_deaths")
+    admitted  <- tot("admitted")
+    subs      <- nrow(df)
+    n_fac     <- if (nrow(df) == 0) 0 else n_distinct(df$facility)
+
+    layout_column_wrap(
+      width = 1/4,
+      value_box(title = "Patients seen (Q4)", value = fmt(patients),
+                showcase = icon("users"), theme = "info"),
+      value_box(title = "Deaths (Q8)", value = fmt(deaths),
+                showcase = icon("heart-pulse"),
+                theme = if (deaths == 0) "success" else "danger"),
+      value_box(title = "Patients admitted (Q5)", value = fmt(admitted),
+                showcase = icon("bed"), theme = "primary"),
+      value_box(title = "Total submissions", value = fmt(subs),
+                showcase = icon("clipboard-list"), theme = "dark",
+                p(paste0("from ", n_fac, " of ", length(facility_choices), " facilities")))
+    )
+  })
+
+  # Scrolling Q14 feed: every submission in the window, grouped by facility.
+  output$kpi_blockage_feed <- renderUI({
+    df <- last_window()
+    if (nrow(df) == 0) {
+      return(p(class = "text-muted p-3",
+               paste0("No submissions in the last ", LAST_HOURS, " hours.")))
+    }
+    df <- df %>% arrange(facility, desc(submitted_local))
+
+    blocks <- lapply(split(df, df$facility), function(d) {
+      tagList(
+        div(class = "feed-facility",
+            paste0(d$facility[1], "  (", nrow(d), " submission", if (nrow(d) > 1) "s", ")")),
+        lapply(seq_len(nrow(d)), function(k) {
+          txt <- d$main_blockage[k]
+          div(class = "feed-item",
+              div(class = "feed-meta",
+                  paste0(format(d$submitted_local[k], "%d %b %H:%M"), " \u00b7 ",
+                         ifelse(is.na(d$shift[k]), "", d$shift[k]), " shift")),
+              if (is.na(txt) || txt == "") em("(no blockage written)") else txt)
+        })
+      )
+    })
+
+    silent <- setdiff(facility_choices, unique(df$facility))
+    footer <- if (input$f_facility == "All Facilities" && length(silent) > 0) {
+      div(class = "feed-meta mt-3 mb-2",
+          strong("No submission in this period: "), paste(silent, collapse = ", "))
+    }
+    tagList(blocks, footer)
   })
 
   # ---- Weekly Signals tab ----
