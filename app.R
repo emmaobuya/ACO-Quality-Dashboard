@@ -200,9 +200,7 @@ ROTATE_TABS <- c(
   "Weekly Overview" = 60,
   "KPIs"            = 120,
   "Timelines (24h)" = 120,
-  "Weekly Signals"  = 60,
-  "Overview"        = 60,
-  "Facility Trends" = 60
+  "Weekly Signals"  = 60
 )
 
 # Window for the KPIs screen and the Q14 tables, based on Kobo submission
