@@ -312,7 +312,7 @@ ui <- page_navbar(
       card(
         card_header(
           div(class = "d-flex justify-content-between align-items-center",
-              span("Main blockage reported"),
+              span(paste0("Main blockage \u2013 last ", LAST_HOURS, " hours")),
               selectInput("wo_blockage_facility", NULL,
                           choices = c("All Facilities", facility_choices),
                           selected = "All Facilities", width = "200px"))
@@ -593,8 +593,7 @@ server <- function(input, output, session) {
 
   # ---- Weekly Overview (default: last 7 days, by the shift date) ----
   # Uses the sidebar Facility/Shift filters but its own period, so the
-  # sidebar date range doesn't change it. Each card compares with the
-  # 7 (or 14 / 30) days before.
+  # sidebar date range doesn't change it.
   today_local <- function() as_date(with_tz(Sys.time(), DISPLAY_TZ))
 
   wo_period <- reactive({
@@ -617,63 +616,65 @@ server <- function(input, output, session) {
     if (nrow(df) == 0) return(df)
     df %>% filter(!is.na(date), date >= pr$start, date <= pr$end)
   })
-  wo_previous <- reactive({
-    df <- f1_scope(); pr <- wo_period()
-    if (nrow(df) == 0) return(df)
-    df %>% filter(!is.na(date), date >= pr$prev_start, date <= pr$prev_end)
-  })
-
   output$wo_period_label <- renderText({
     pr <- wo_period()
     paste0("Last ", pr$n, " days: ", format(pr$start, "%d %b"), " \u2013 ",
            format(pr$end, "%d %b %Y"))
   })
 
+  # Form 3 records in the same period (for the LWBS card)
+  wo_f3 <- reactive({
+    df <- live_data()$form3
+    pr <- wo_period()
+    if (nrow(df) == 0) return(df)
+    if (input$f_facility != "All Facilities") df <- df %>% filter(facility == input$f_facility)
+    df %>% filter(shift %in% input$f_shift, !is.na(record_date),
+                  record_date >= pr$start, record_date <= pr$end)
+  })
+
+  # Same five cards, colours and sub-lines as the Overview screen, but for
+  # the selected period (last 7 days by default). No comparison lines.
   output$wo_kpis <- renderUI({
-    cur <- wo_current(); prv <- wo_previous(); pr <- wo_period()
-    tot <- function(df, col) if (nrow(df) == 0) 0 else sum(df[[col]], na.rm = TRUE)
-    sepsis_pct <- function(df) {
-      d <- tot(df, "sepsis_cases")
-      if (d == 0) NA_real_ else 100 * tot(df, "sepsis_bundle_completed") / d
+    df <- wo_current()
+    f3 <- wo_f3()
+
+    total_submissions <- nrow(df)
+    patients <- if (nrow(df) == 0) NA_real_ else sum(df$patients_seen, na.rm = TRUE)
+    died_n   <- if (nrow(df) == 0) NA_real_ else sum(df$total_deaths, na.rm = TRUE)
+    death_rate <- if (is.na(patients) || patients == 0) NA_real_ else 100 * died_n / patients
+
+    f3_total <- nrow(f3)
+    lwbs_n   <- if (f3_total == 0) NA_real_ else sum(f3$outcome_24h == "LWBS", na.rm = TRUE)
+    lwbs_pct <- if (f3_total == 0 || is.na(lwbs_n)) NA_real_ else 100 * lwbs_n / f3_total
+
+    sepsis_tot  <- if (nrow(df) == 0) NA_real_ else sum(df$sepsis_cases, na.rm = TRUE)
+    sepsis_rate <- if (is.na(sepsis_tot) || sepsis_tot == 0) NA_real_ else
+      100 * sum(df$sepsis_bundle_completed, na.rm = TRUE) / sepsis_tot
+
+    fmt_int <- function(v) if (is.na(v)) "--" else format(round(v), big.mark = ",")
+    fmt_pct <- function(v) if (is.na(v)) "--" else paste0(round(v, 1), "%")
+    sub_line <- function(pct, txt, none) {
+      p(class = "text-muted small", if (is.na(pct)) none else paste0(round(pct, 1), txt))
     }
-    vals <- list(
-      submissions = c(nrow(cur), nrow(prv)),
-      patients    = c(tot(cur, "patients_seen"), tot(prv, "patients_seen")),
-      admitted    = c(tot(cur, "admitted"),      tot(prv, "admitted")),
-      deaths      = c(tot(cur, "total_deaths"),  tot(prv, "total_deaths")),
-      lwbs        = c(tot(cur, "lwbs"),          tot(prv, "lwbs")),
-      sepsis      = c(sepsis_pct(cur),           sepsis_pct(prv))
-    )
-    fmt <- function(v, pct = FALSE) {
-      if (is.na(v)) return("--")
-      if (pct) paste0(round(v, 1), "%") else format(round(v), big.mark = ",")
-    }
-    change <- function(v, pct = FALSE) {
-      if (any(is.na(v))) return(p(class = "small mb-0", paste0("No data for previous ", pr$n, " days")))
-      d <- v[1] - v[2]
-      arrow <- if (d > 0) "arrow-up" else if (d < 0) "arrow-down" else "minus"
-      p(class = "small mb-0", icon(arrow), paste0(" ", fmt(abs(d), pct), " vs previous ", pr$n, " days"))
-    }
-    deaths_theme <- if (vals$deaths[1] == 0) "success" else "danger"
-    lwbs_theme   <- if (vals$lwbs[1] == 0) "success" else "warning"
-    sep <- vals$sepsis[1]
-    sepsis_theme <- if (is.na(sep)) "secondary" else if (sep >= 90) "success" else
-                    if (sep >= 70) "warning" else "danger"
+
+    deaths_theme <- if (is.na(died_n)) "secondary" else if (died_n == 0) "success" else "danger"
+    lwbs_theme   <- if (is.na(lwbs_pct)) "secondary" else if (lwbs_pct >= 10) "danger" else if (lwbs_pct >= 5) "warning" else "success"
+    sepsis_theme <- if (is.na(sepsis_rate)) "secondary" else if (sepsis_rate >= 90) "success" else if (sepsis_rate >= 70) "warning" else "danger"
 
     layout_column_wrap(
-      width = "200px", class = "mt-2",
-      value_box(title = "Total submissions", value = fmt(vals$submissions[1]),
-                showcase = icon("clipboard-list"), theme = "primary", change(vals$submissions)),
-      value_box(title = "Patients seen", value = fmt(vals$patients[1]),
-                showcase = icon("users"), theme = "info", change(vals$patients)),
-      value_box(title = "Patients admitted", value = fmt(vals$admitted[1]),
-                showcase = icon("bed"), theme = "info", change(vals$admitted)),
-      value_box(title = "Deaths recorded", value = fmt(vals$deaths[1]),
-                showcase = icon("heart-pulse"), theme = deaths_theme, change(vals$deaths)),
-      value_box(title = "Left without being seen", value = fmt(vals$lwbs[1]),
-                showcase = icon("person-walking-arrow-right"), theme = lwbs_theme, change(vals$lwbs)),
-      value_box(title = "Sepsis bundle compliance", value = fmt(sep, TRUE),
-                showcase = icon("syringe"), theme = sepsis_theme, change(vals$sepsis, TRUE))
+      width = 1/5, class = "mt-2",
+      value_box(title = "Total submissions", value = fmt_int(total_submissions),
+                showcase = icon("clipboard-list"), theme = "primary"),
+      value_box(title = "Patients seen", value = fmt_int(patients),
+                showcase = icon("users"), theme = "info"),
+      value_box(title = "Total deaths", value = fmt_int(died_n),
+                showcase = icon("heart-pulse"), theme = deaths_theme,
+                sub_line(death_rate, "% of patients seen", "No patients-seen data")),
+      value_box(title = "LWBS (24h)", value = fmt_int(lwbs_n),
+                showcase = icon("person-walking-arrow-right"), theme = lwbs_theme,
+                sub_line(lwbs_pct, "% of patient records", "No patient records")),
+      value_box(title = "Sepsis bundle compliance", value = fmt_pct(sepsis_rate),
+                showcase = icon("syringe"), theme = sepsis_theme)
     )
   })
 
@@ -688,23 +689,24 @@ server <- function(input, output, session) {
       layout(xaxis = list(title = ""), yaxis = list(title = lbl))
   })
 
+  # Main blockage on the Weekly Overview stays on the LAST 24 HOURS
   output$wo_blockage_table <- renderDT({
-    df <- wo_current()
-    empty_msg <- datatable(data.frame(Message = "No blockage notes for this period"),
-                           rownames = FALSE, options = list(dom = "t"))
+    df <- last_window()
+    empty_msg <- datatable(
+      data.frame(Message = paste0("No blockage notes in the last ", LAST_HOURS, " hours")),
+      rownames = FALSE, options = list(dom = "t"))
     if (nrow(df) == 0 || !"main_blockage" %in% names(df)) return(empty_msg)
     if (!is.null(input$wo_blockage_facility) && input$wo_blockage_facility != "All Facilities") {
       df <- df %>% filter(facility == input$wo_blockage_facility)
     }
     df <- df %>%
-      mutate(main_blockage = trimws(main_blockage),
-             shift = factor(shift, levels = names(SHIFT_ORDER))) %>%
       filter(!is.na(main_blockage), main_blockage != "") %>%
-      arrange(desc(date), facility, desc(shift)) %>%
-      transmute(date = format(date, "%d %b %Y"), facility, shift = as.character(shift), main_blockage)
+      arrange(desc(submitted_local)) %>%
+      transmute(submitted = format(submitted_local, "%d %b %H:%M"),
+                facility, shift, main_blockage)
     if (nrow(df) == 0) return(empty_msg)
     datatable(df, rownames = FALSE,
-              colnames = c("Date", "Facility", "Shift", "Main blockage"),
+              colnames = c("Submitted", "Facility", "Shift", "Main blockage"),
               options = list(pageLength = 6, scrollX = TRUE, scrollY = "260px",
                              dom = "ftip", ordering = FALSE))
   })
