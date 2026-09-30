@@ -35,6 +35,9 @@
 #      submissions for the last 24 hours, plus an auto-scrolling feed of
 #      every Q14 answer by facility. Overview Q14 table now shows the last
 #      24 hours instead of a week picker. Rotation time set per tab.
+#   9. New "Form 3 (24h)" tab: Form 3 indicators for the last 24 hours
+#      (times, triage, outcome, disposition, diagnosis) plus a scrolling
+#      patient line list. Needs the updated kobo_connect.R.
 # ==============================================================================
 
 library(shiny)
@@ -136,6 +139,37 @@ bar_label <- function(v) {
                 formatC(v, format = "f", digits = 1, big.mark = ",")))
 }
 
+# Form 3 screen helpers ---------------------------------------------------
+TRIAGE_COLORS  <- c("Red" = "#d62728", "Yellow" = "#f0ad4e", "Green" = "#5cb85c")
+OUTCOME_COLORS <- c("Alive and well" = "#5cb85c", "Alive - deteriorated" = "#f0ad4e",
+                    "Died" = "#d62728", "Still in A&E" = "#3498db", "LWBS" = "#95a5a6")
+# Clinician-wait limits used to flag delays (same as Form 1 Q10 / Q18)
+DELAY_LIMIT_MIN <- c("Red" = 60, "Yellow" = 120)
+
+fmt_minutes <- function(m) {
+  if (length(m) == 0 || is.na(m) || is.nan(m)) return("--")
+  if (m >= 120) paste0(round(m / 60, 1), " h") else paste0(round(m), " min")
+}
+
+# Horizontal count bar with the number at the end of each bar
+count_bar <- function(df, col, levels = NULL, colors = NULL, height = 230) {
+  if (nrow(df) == 0) return(plotly_empty(type = "bar") |> layout(title = "No records"))
+  d <- df %>% mutate(.v = ifelse(is.na(.data[[col]]) | .data[[col]] == "", "Not recorded",
+                                 .data[[col]])) %>% count(.v)
+  if (!is.null(levels)) {
+    d$.v <- droplevels(factor(d$.v, levels = rev(unique(c(levels, sort(setdiff(d$.v, levels)))))))
+  } else {
+    d$.v <- reorder(d$.v, d$n)
+  }
+  bar_cols <- if (is.null(colors)) "#3498db" else
+    unname(ifelse(as.character(d$.v) %in% names(colors), colors[as.character(d$.v)], "#95a5a6"))
+  plot_ly(d, x = ~n, y = ~.v, type = "bar", orientation = "h", height = height,
+          marker = list(color = bar_cols),
+          text = ~n, textposition = "outside", cliponaxis = FALSE) |>
+    layout(xaxis = list(title = "", zeroline = FALSE), yaxis = list(title = ""),
+           margin = list(l = 10, r = 30, t = 10, b = 20))
+}
+
 # Weeks run Sunday -> Saturday (lubridate: 7 = Sunday).
 WEEK_START_DAY <- 7
 
@@ -161,6 +195,7 @@ SHIFT_ORDER <- c("Morning" = 1, "Afternoon" = 2, "Night" = 3)
 ROTATE_TABS <- c(
   "Overview"        = 60,
   "KPIs"            = 120,
+  "Form 3 (24h)"    = 120,
   "Weekly Signals"  = 60,
   "Facility Trends" = 60
 )
@@ -279,6 +314,25 @@ ui <- page_navbar(
       card_header(paste0("Main blockage by facility \u2013 last ", LAST_HOURS,
                          " hours (Form 1 Q14)")),
       div(class = "auto-scroll", uiOutput("kpi_blockage_feed"))
+    )
+  ),
+
+  nav_panel(
+    "Form 3 (24h)",
+    h5(class = "mt-2 text-muted", textOutput("f3_window_label", inline = TRUE)),
+    uiOutput("f3_boxes"),
+    layout_column_wrap(
+      width = 1/4, class = "mt-3",
+      card(card_header("Triage category"),  plotlyOutput("f3_triage_chart",  height = "240px")),
+      card(card_header("Outcome at 24 hours"), plotlyOutput("f3_outcome_chart", height = "240px")),
+      card(card_header("Disposed to (Q8b)"), plotlyOutput("f3_dispo_chart",   height = "240px")),
+      card(card_header("Main diagnosis"),   plotlyOutput("f3_diag_chart",    height = "240px"))
+    ),
+    card(
+      class = "mt-3",
+      card_header(paste0("Patient records \u2013 last ", LAST_HOURS,
+                         " hours (Form 3)  \u00b7  red border = Red triage, DELAY = waited past the limit")),
+      div(class = "auto-scroll", style = "height: 45vh;", uiOutput("f3_patient_feed"))
     )
   ),
 
@@ -666,6 +720,132 @@ server <- function(input, output, session) {
           strong("No submission in this period: "), paste(silent, collapse = ", "))
     }
     tagList(blocks, footer)
+  })
+
+  # ---- Form 3 (24h) screen ----
+  # Form 3 patient records whose parent submission reached Kobo in the last
+  # LAST_HOURS hours. Uses the sidebar Facility/Shift/Date filters.
+  f3_window <- reactive({
+    invalidateLater(5 * 60 * 1000)
+    df <- f3_filtered()
+    if (nrow(df) == 0 || !"submission_time" %in% names(df)) return(data.frame())
+    cutoff <- Sys.time() - LAST_HOURS * 3600
+    df %>%
+      filter(!is.na(submission_time), submission_time >= cutoff) %>%
+      mutate(
+        submitted_local = with_tz(submission_time, DISPLAY_TZ),
+        limit   = unname(DELAY_LIMIT_MIN[triage_category]),
+        delayed = !is.na(limit) & !is.na(time_to_clinician_min) &
+                  time_to_clinician_min > limit,
+        dispo_show = ifelse(!is.na(disposition) & disposition == "Other" &
+                              !is.na(disposition_other) & disposition_other != "",
+                            paste0("Other: ", disposition_other), disposition),
+        diag_show  = ifelse(!is.na(diagnosis) & diagnosis == "Other" &
+                              !is.na(diagnosis_other) & diagnosis_other != "",
+                            paste0("Other: ", diagnosis_other), diagnosis)
+      )
+  })
+
+  output$f3_window_label <- renderText({
+    invalidateLater(60 * 1000)
+    now <- with_tz(Sys.time(), DISPLAY_TZ)
+    paste0("Form 3 patient records, last ", LAST_HOURS, " hours: ",
+           format(now - LAST_HOURS * 3600, "%d %b %H:%M"), " \u2013 ",
+           format(now, "%d %b %Y %H:%M"))
+  })
+
+  output$f3_boxes <- renderUI({
+    df <- f3_window()
+    n  <- nrow(df)
+    avg <- function(col) if (n == 0) NA_real_ else mean(df[[col]], na.rm = TRUE)
+    died    <- if (n == 0) 0 else sum(df$outcome_24h == "Died", na.rm = TRUE)
+    red     <- if (n == 0) df else df %>% filter(triage_category == "Red", !is.na(time_to_clinician_min))
+    red_ok  <- if (nrow(red) == 0) NA_real_ else 100 * mean(red$time_to_clinician_min <= 60)
+    n_fac   <- if (n == 0) 0 else n_distinct(df$facility)
+    red_theme <- if (is.na(red_ok)) "secondary" else if (red_ok >= 90) "success" else
+                 if (red_ok >= 70) "warning" else "danger"
+
+    layout_column_wrap(
+      width = "200px",
+      value_box(title = "Patients recorded", value = format(n, big.mark = ","),
+                showcase = icon("hospital-user"), theme = "primary",
+                p(paste0("from ", n_fac, " facilit", if (n_fac == 1) "y" else "ies"))),
+      value_box(title = "Avg. time to triage", value = fmt_minutes(avg("time_to_triage_min")),
+                showcase = icon("stopwatch"), theme = "info"),
+      value_box(title = "Avg. time to clinician", value = fmt_minutes(avg("time_to_clinician_min")),
+                showcase = icon("user-doctor"), theme = "info"),
+      value_box(title = "Avg. length of stay", value = fmt_minutes(avg("length_of_stay_min")),
+                showcase = icon("hourglass-half"), theme = "info"),
+      value_box(title = "Red seen within 60 min",
+                value = if (is.na(red_ok)) "--" else paste0(round(red_ok), "%"),
+                showcase = icon("truck-medical"), theme = red_theme,
+                p(paste0(nrow(red), " Red case", if (nrow(red) != 1) "s"))),
+      value_box(title = "Died (24h outcome)", value = died,
+                showcase = icon("heart-pulse"),
+                theme = if (died == 0) "success" else "danger")
+    )
+  })
+
+  output$f3_triage_chart <- renderPlotly({
+    count_bar(f3_window(), "triage_category", levels = names(TRIAGE_COLORS), colors = TRIAGE_COLORS)
+  })
+  output$f3_outcome_chart <- renderPlotly({
+    count_bar(f3_window(), "outcome_24h", levels = names(OUTCOME_COLORS), colors = OUTCOME_COLORS)
+  })
+  output$f3_dispo_chart <- renderPlotly({
+    count_bar(f3_window(), "disposition")
+  })
+  output$f3_diag_chart <- renderPlotly({
+    count_bar(f3_window(), "diagnosis")
+  })
+
+  # Scrolling line list: one row per patient, newest first, Red rows marked
+  output$f3_patient_feed <- renderUI({
+    df <- f3_window()
+    if (nrow(df) == 0) {
+      return(p(class = "text-muted p-3",
+               paste0("No Form 3 patient records in the last ", LAST_HOURS, " hours.")))
+    }
+    df <- df %>% arrange(desc(submitted_local), facility)
+    na_dash <- function(x) ifelse(is.na(x) | x == "", "--", x)
+    triage_badge <- function(t) {
+      col <- if (!is.na(t) && t %in% names(TRIAGE_COLORS)) TRIAGE_COLORS[[t]] else "#95a5a6"
+      span(class = "badge", style = paste0("background:", col, "; font-size:.95rem;"), na_dash(t))
+    }
+    outcome_badge <- function(o) {
+      col <- if (!is.na(o) && o %in% names(OUTCOME_COLORS)) OUTCOME_COLORS[[o]] else "#95a5a6"
+      span(class = "badge", style = paste0("background:", col, "; font-size:.95rem;"), na_dash(o))
+    }
+
+    rows <- lapply(seq_len(nrow(df)), function(k) {
+      r <- df[k, ]
+      tri <- r$triage_category
+      border <- if (!is.na(tri) && tri == "Red") "4px solid #d62728" else "4px solid transparent"
+      tags$tr(
+        style = paste0("border-left:", border, ";"),
+        tags$td(format(r$submitted_local, "%d %b %H:%M")),
+        tags$td(strong(na_dash(r$facility)), br(),
+                span(class = "feed-meta", paste(na_dash(r$ward), "\u00b7", na_dash(r$shift)))),
+        tags$td(na_dash(r$triage_id)),
+        tags$td(triage_badge(tri)),
+        tags$td(na_dash(r$diag_show)),
+        tags$td(fmt_minutes(r$time_to_triage_min)),
+        tags$td(fmt_minutes(r$time_to_clinician_min),
+                if (isTRUE(r$delayed)) span(class = "badge bg-danger ms-1", "DELAY")),
+        tags$td(fmt_minutes(r$length_of_stay_min)),
+        tags$td(na_dash(r$dispo_show)),
+        tags$td(outcome_badge(r$outcome_24h))
+      )
+    })
+
+    tags$table(
+      class = "table table-sm align-middle", style = "font-size:1.05rem;",
+      tags$thead(style = "position:sticky; top:0; background:var(--bs-body-bg); z-index:1;",
+        tags$tr(lapply(c("Submitted", "Facility", "Patient ID", "Triage", "Diagnosis",
+                         "To triage", "To clinician", "Stay", "Disposed to", "Outcome 24h"),
+                       tags$th))),
+      tags$tbody(rows)
+    )
   })
 
   # ---- Weekly Signals tab ----
