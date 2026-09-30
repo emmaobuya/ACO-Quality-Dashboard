@@ -35,7 +35,7 @@
 #      submissions for the last 24 hours, plus an auto-scrolling feed of
 #      every Q14 answer by facility. Overview Q14 table now shows the last
 #      24 hours instead of a week picker. Rotation time set per tab.
-#   9. New "Form 3 (24h)" tab: Form 3 indicators for the last 24 hours
+#   9. New "Timelines (24h)" tab: Form 3 indicators for the last 24 hours
 #      (times, triage, outcome, disposition, diagnosis) plus a scrolling
 #      patient line list. Needs the updated kobo_connect.R.
 # ==============================================================================
@@ -195,7 +195,7 @@ SHIFT_ORDER <- c("Morning" = 1, "Afternoon" = 2, "Night" = 3)
 ROTATE_TABS <- c(
   "Overview"        = 60,
   "KPIs"            = 120,
-  "Form 3 (24h)"    = 120,
+  "Timelines (24h)" = 120,
   "Weekly Signals"  = 60,
   "Facility Trends" = 60
 )
@@ -251,6 +251,13 @@ ui <- page_navbar(
       .feed-item { font-size: 1.15rem; padding: .5rem .75rem; margin-bottom: .4rem;
                    border-left: 4px solid var(--bs-info); background: var(--bs-light); }
       .feed-meta { font-size: .9rem; color: var(--bs-secondary); }
+      .f3-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1rem; }
+      .f3-grid > .card, .f3-grid .bslib-value-box { margin: 0; }
+      .f3-diag { grid-column: span 4; }
+      @media (max-width: 1100px) {
+        .f3-grid { grid-template-columns: repeat(2, 1fr); }
+        .f3-diag { grid-column: span 2; }
+      }
     "))
   ),
   theme = bs_theme(version = 5, bootswatch = "flatly"),
@@ -318,15 +325,20 @@ ui <- page_navbar(
   ),
 
   nav_panel(
-    "Form 3 (24h)",
+    "Timelines (24h)",
     h5(class = "mt-2 text-muted", textOutput("f3_window_label", inline = TRUE)),
-    uiOutput("f3_boxes"),
+    # Five cards per row; "Died" plus the Q10 diagnosis chart fill row two.
+    div(class = "f3-grid",
+        uiOutput("f3_boxes", style = "display: contents;"),
+        card(class = "f3-diag",
+             card_header("10. What was the main diagnosis?"),
+             plotlyOutput("f3_diag_chart", height = "200px"))
+    ),
     layout_column_wrap(
-      width = 1/4, class = "mt-3",
+      width = 1/3, class = "mt-3",
       card(card_header("Triage category"),  plotlyOutput("f3_triage_chart",  height = "240px")),
       card(card_header("Outcome at 24 hours"), plotlyOutput("f3_outcome_chart", height = "240px")),
-      card(card_header("Disposed to (Q8b)"), plotlyOutput("f3_dispo_chart",   height = "240px")),
-      card(card_header("Main diagnosis"),   plotlyOutput("f3_diag_chart",    height = "240px"))
+      card(card_header("Disposed to (Q8b)"), plotlyOutput("f3_dispo_chart",   height = "240px"))
     ),
     card(
       class = "mt-3",
@@ -722,7 +734,7 @@ server <- function(input, output, session) {
     tagList(blocks, footer)
   })
 
-  # ---- Form 3 (24h) screen ----
+  # ---- Timelines (24h) screen (Form 3) ----
   # Form 3 patient records whose parent submission reached Kobo in the last
   # LAST_HOURS hours. Uses the sidebar Facility/Shift/Date filters.
   f3_window <- reactive({
@@ -765,8 +777,7 @@ server <- function(input, output, session) {
     red_theme <- if (is.na(red_ok)) "secondary" else if (red_ok >= 90) "success" else
                  if (red_ok >= 70) "warning" else "danger"
 
-    layout_column_wrap(
-      width = "200px",
+    tagList(
       value_box(title = "Patients recorded", value = format(n, big.mark = ","),
                 showcase = icon("hospital-user"), theme = "primary",
                 p(paste0("from ", n_fac, " facilit", if (n_fac == 1) "y" else "ies"))),
@@ -796,7 +807,7 @@ server <- function(input, output, session) {
     count_bar(f3_window(), "disposition")
   })
   output$f3_diag_chart <- renderPlotly({
-    count_bar(f3_window(), "diagnosis")
+    count_bar(f3_window(), "diag_show", height = 200)
   })
 
   # Scrolling line list: one row per patient, newest first, Red rows marked
