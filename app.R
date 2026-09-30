@@ -38,6 +38,10 @@
 #   9. New "Timelines (24h)" tab: Form 3 indicators for the last 24 hours
 #      (times, triage, outcome, disposition, diagnosis) plus a scrolling
 #      patient line list. Needs the updated kobo_connect.R.
+#  10. New first tab "Weekly Overview" (last 7 days by default, with 14/30
+#      day options and change vs the previous period). The original
+#      Overview now sits after Weekly Signals. Question numbers removed
+#      from all on-screen labels.
 # ==============================================================================
 
 library(shiny)
@@ -56,7 +60,7 @@ source("kobo_connect.R")   # config, fetch, parse -- see that file for details
 metrics_list <- list(
   submissions        = list(label = "Number of submissions", type = "count"),
   patients_seen      = list(label = "Total patients seen", type = "sum"),
-  total_deaths       = list(label = "Deaths recorded (Form 1 Q8)", type = "sum"),
+  total_deaths       = list(label = "Deaths recorded", type = "sum"),
   death_rate         = list(label = "Death rate (%)", type = "rate",
                              numerator = "total_deaths", denominator = "patients_seen"),
   lwbs_rate          = list(label = "LWBS rate (%)", type = "rate",
@@ -193,10 +197,11 @@ SHIFT_ORDER <- c("Morning" = 1, "Afternoon" = 2, "Night" = 3)
 # hides the sidebar -- use that link on the office screen.
 # Seconds per tab -- the KPIs screen gets longer so its Q14 feed can scroll.
 ROTATE_TABS <- c(
-  "Overview"        = 60,
+  "Weekly Overview" = 60,
   "KPIs"            = 120,
   "Timelines (24h)" = 120,
   "Weekly Signals"  = 60,
+  "Overview"        = 60,
   "Facility Trends" = 60
 )
 
@@ -287,27 +292,32 @@ ui <- page_navbar(
   ),
 
   nav_panel(
-    "Overview",
-    uiOutput("overview_kpis"),
+    "Weekly Overview",
+    div(class = "d-flex flex-wrap align-items-center gap-3 mt-2",
+        h5(class = "text-muted mb-0", textOutput("wo_period_label", inline = TRUE)),
+        selectInput("wo_days", NULL, width = "170px",
+                    choices = c("Last 7 days" = 7, "Last 14 days" = 14, "Last 30 days" = 30),
+                    selected = 7)),
+    uiOutput("wo_kpis"),
     layout_columns(
-      col_widths = c(6, 6),
+      col_widths = c(6, 6), class = "mt-3",
       card(
         card_header(
           div(class = "d-flex justify-content-between align-items-center",
               span("Compare facilities"),
-              selectInput("overview_metric_facility", NULL, choices = metric_choices, width = "260px"))
+              selectInput("wo_metric", NULL, choices = metric_choices, width = "260px"))
         ),
-        plotlyOutput("facility_compare_chart", height = "320px")
+        plotlyOutput("wo_facility_chart", height = "320px")
       ),
       card(
         card_header(
           div(class = "d-flex justify-content-between align-items-center",
-              span(paste0("Main blockage \u2013 last ", LAST_HOURS, " hours (Form 1 Q14)")),
-              selectInput("blockage_facility", NULL,
+              span("Main blockage reported"),
+              selectInput("wo_blockage_facility", NULL,
                           choices = c("All Facilities", facility_choices),
                           selected = "All Facilities", width = "200px"))
         ),
-        DTOutput("blockage_table")
+        DTOutput("wo_blockage_table")
       )
     )
   ),
@@ -319,7 +329,7 @@ ui <- page_navbar(
     card(
       class = "mt-3",
       card_header(paste0("Main blockage by facility \u2013 last ", LAST_HOURS,
-                         " hours (Form 1 Q14)")),
+                         " hours")),
       div(class = "auto-scroll", uiOutput("kpi_blockage_feed"))
     )
   ),
@@ -331,19 +341,19 @@ ui <- page_navbar(
     div(class = "f3-grid",
         uiOutput("f3_boxes", style = "display: contents;"),
         card(class = "f3-diag",
-             card_header("10. What was the main diagnosis?"),
+             card_header("Main diagnosis"),
              plotlyOutput("f3_diag_chart", height = "200px"))
     ),
     layout_column_wrap(
       width = 1/3, class = "mt-3",
       card(card_header("Triage category"),  plotlyOutput("f3_triage_chart",  height = "240px")),
       card(card_header("Outcome at 24 hours"), plotlyOutput("f3_outcome_chart", height = "240px")),
-      card(card_header("Disposed to (Q8b)"), plotlyOutput("f3_dispo_chart",   height = "240px"))
+      card(card_header("Where patients were sent"), plotlyOutput("f3_dispo_chart",   height = "240px"))
     ),
     card(
       class = "mt-3",
       card_header(paste0("Patient records \u2013 last ", LAST_HOURS,
-                         " hours (Form 3)  \u00b7  red border = Red triage, DELAY = waited past the limit")),
+                         " hours  \u00b7  red border = Red triage, DELAY = waited past the limit")),
       div(class = "auto-scroll", style = "height: 45vh;", uiOutput("f3_patient_feed"))
     )
   ),
@@ -366,6 +376,32 @@ ui <- page_navbar(
     card(
       card_header("Weekly Signals Table"),
       DTOutput("weekly_signals_table")
+    )
+  ),
+
+  nav_panel(
+    "Overview",
+    uiOutput("overview_kpis"),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(
+        card_header(
+          div(class = "d-flex justify-content-between align-items-center",
+              span("Compare facilities"),
+              selectInput("overview_metric_facility", NULL, choices = metric_choices, width = "260px"))
+        ),
+        plotlyOutput("facility_compare_chart", height = "320px")
+      ),
+      card(
+        card_header(
+          div(class = "d-flex justify-content-between align-items-center",
+              span(paste0("Main blockage \u2013 last ", LAST_HOURS, " hours")),
+              selectInput("blockage_facility", NULL,
+                          choices = c("All Facilities", facility_choices),
+                          selected = "All Facilities", width = "200px"))
+        ),
+        DTOutput("blockage_table")
+      )
     )
   ),
 
@@ -394,7 +430,7 @@ ui <- page_navbar(
   ),
 
   nav_panel(
-    "Event Log (Form 2)",
+    "Event Log",
     layout_columns(
       col_widths = c(6, 6),
       card(
@@ -413,7 +449,7 @@ ui <- page_navbar(
   ),
 
   nav_panel(
-    "Patient Flow (Form 3)",
+    "Patient Flow",
     layout_columns(
       col_widths = c(4, 4, 4),
       value_box(title = "Avg. time to triage", value = textOutput("kpi_time_triage"), showcase = icon("stopwatch")),
@@ -555,6 +591,124 @@ server <- function(input, output, session) {
       )
   })
 
+  # ---- Weekly Overview (default: last 7 days, by the shift date) ----
+  # Uses the sidebar Facility/Shift filters but its own period, so the
+  # sidebar date range doesn't change it. Each card compares with the
+  # 7 (or 14 / 30) days before.
+  today_local <- function() as_date(with_tz(Sys.time(), DISPLAY_TZ))
+
+  wo_period <- reactive({
+    invalidateLater(5 * 60 * 1000)
+    n   <- as.integer(if (is.null(input$wo_days)) 7 else input$wo_days)
+    end <- today_local()
+    start <- end - n + 1
+    list(n = n, start = start, end = end, prev_start = start - n, prev_end = start - 1)
+  })
+
+  f1_scope <- reactive({
+    df <- live_data()$form1
+    if (nrow(df) == 0) return(df)
+    if (input$f_facility != "All Facilities") df <- df %>% filter(facility == input$f_facility)
+    df %>% filter(shift %in% input$f_shift)
+  })
+
+  wo_current <- reactive({
+    df <- f1_scope(); pr <- wo_period()
+    if (nrow(df) == 0) return(df)
+    df %>% filter(!is.na(date), date >= pr$start, date <= pr$end)
+  })
+  wo_previous <- reactive({
+    df <- f1_scope(); pr <- wo_period()
+    if (nrow(df) == 0) return(df)
+    df %>% filter(!is.na(date), date >= pr$prev_start, date <= pr$prev_end)
+  })
+
+  output$wo_period_label <- renderText({
+    pr <- wo_period()
+    paste0("Last ", pr$n, " days: ", format(pr$start, "%d %b"), " \u2013 ",
+           format(pr$end, "%d %b %Y"))
+  })
+
+  output$wo_kpis <- renderUI({
+    cur <- wo_current(); prv <- wo_previous(); pr <- wo_period()
+    tot <- function(df, col) if (nrow(df) == 0) 0 else sum(df[[col]], na.rm = TRUE)
+    sepsis_pct <- function(df) {
+      d <- tot(df, "sepsis_cases")
+      if (d == 0) NA_real_ else 100 * tot(df, "sepsis_bundle_completed") / d
+    }
+    vals <- list(
+      submissions = c(nrow(cur), nrow(prv)),
+      patients    = c(tot(cur, "patients_seen"), tot(prv, "patients_seen")),
+      admitted    = c(tot(cur, "admitted"),      tot(prv, "admitted")),
+      deaths      = c(tot(cur, "total_deaths"),  tot(prv, "total_deaths")),
+      lwbs        = c(tot(cur, "lwbs"),          tot(prv, "lwbs")),
+      sepsis      = c(sepsis_pct(cur),           sepsis_pct(prv))
+    )
+    fmt <- function(v, pct = FALSE) {
+      if (is.na(v)) return("--")
+      if (pct) paste0(round(v, 1), "%") else format(round(v), big.mark = ",")
+    }
+    change <- function(v, pct = FALSE) {
+      if (any(is.na(v))) return(p(class = "small mb-0", paste0("No data for previous ", pr$n, " days")))
+      d <- v[1] - v[2]
+      arrow <- if (d > 0) "arrow-up" else if (d < 0) "arrow-down" else "minus"
+      p(class = "small mb-0", icon(arrow), paste0(" ", fmt(abs(d), pct), " vs previous ", pr$n, " days"))
+    }
+    deaths_theme <- if (vals$deaths[1] == 0) "success" else "danger"
+    lwbs_theme   <- if (vals$lwbs[1] == 0) "success" else "warning"
+    sep <- vals$sepsis[1]
+    sepsis_theme <- if (is.na(sep)) "secondary" else if (sep >= 90) "success" else
+                    if (sep >= 70) "warning" else "danger"
+
+    layout_column_wrap(
+      width = "200px", class = "mt-2",
+      value_box(title = "Total submissions", value = fmt(vals$submissions[1]),
+                showcase = icon("clipboard-list"), theme = "primary", change(vals$submissions)),
+      value_box(title = "Patients seen", value = fmt(vals$patients[1]),
+                showcase = icon("users"), theme = "info", change(vals$patients)),
+      value_box(title = "Patients admitted", value = fmt(vals$admitted[1]),
+                showcase = icon("bed"), theme = "info", change(vals$admitted)),
+      value_box(title = "Deaths recorded", value = fmt(vals$deaths[1]),
+                showcase = icon("heart-pulse"), theme = deaths_theme, change(vals$deaths)),
+      value_box(title = "Left without being seen", value = fmt(vals$lwbs[1]),
+                showcase = icon("person-walking-arrow-right"), theme = lwbs_theme, change(vals$lwbs)),
+      value_box(title = "Sepsis bundle compliance", value = fmt(sep, TRUE),
+                showcase = icon("syringe"), theme = sepsis_theme, change(vals$sepsis, TRUE))
+    )
+  })
+
+  output$wo_facility_chart <- renderPlotly({
+    req(input$wo_metric)
+    df <- wo_current()
+    if (nrow(df) == 0) return(plotly_empty(type = "bar") |> layout(title = "No data for this period"))
+    m <- compute_metric(df, "facility", input$wo_metric)
+    lbl <- metrics_list[[input$wo_metric]]$label
+    plot_ly(m, x = ~facility, y = ~value, type = "bar",
+            text = ~bar_label(value), textposition = "outside", cliponaxis = FALSE) |>
+      layout(xaxis = list(title = ""), yaxis = list(title = lbl))
+  })
+
+  output$wo_blockage_table <- renderDT({
+    df <- wo_current()
+    empty_msg <- datatable(data.frame(Message = "No blockage notes for this period"),
+                           rownames = FALSE, options = list(dom = "t"))
+    if (nrow(df) == 0 || !"main_blockage" %in% names(df)) return(empty_msg)
+    if (!is.null(input$wo_blockage_facility) && input$wo_blockage_facility != "All Facilities") {
+      df <- df %>% filter(facility == input$wo_blockage_facility)
+    }
+    df <- df %>%
+      mutate(main_blockage = trimws(main_blockage),
+             shift = factor(shift, levels = names(SHIFT_ORDER))) %>%
+      filter(!is.na(main_blockage), main_blockage != "") %>%
+      arrange(desc(date), facility, desc(shift)) %>%
+      transmute(date = format(date, "%d %b %Y"), facility, shift = as.character(shift), main_blockage)
+    if (nrow(df) == 0) return(empty_msg)
+    datatable(df, rownames = FALSE,
+              colnames = c("Date", "Facility", "Shift", "Main blockage"),
+              options = list(pageLength = 6, scrollX = TRUE, scrollY = "260px",
+                             dom = "ftip", ordering = FALSE))
+  })
+
   # ---- Overview KPIs ----
   # Total submissions, patients seen and TOTAL DEATHS come from Form 1 (the
   # per-shift tally that every submission fills in). Deaths used to be
@@ -586,12 +740,12 @@ server <- function(input, output, session) {
     fmt_pct <- function(v) if (is.na(v)) "--" else paste0(round(v, 1), "%")
     subtitle <- function(pct, label) {
       if (is.na(pct)) p(class = "text-muted small", paste0("No ", label, " data")) else
-        p(class = "text-muted small", paste0(round(pct, 1), "% of Form 3 patients"))
+        p(class = "text-muted small", paste0(round(pct, 1), "% of patient records"))
     }
     death_subtitle <- if (is.na(death_rate)) {
       p(class = "text-muted small", "No patients-seen data")
     } else {
-      p(class = "text-muted small", paste0(round(death_rate, 1), "% of patients seen (Form 1)"))
+      p(class = "text-muted small", paste0(round(death_rate, 1), "% of patients seen"))
     }
 
     # Threshold-based coloring
@@ -689,12 +843,12 @@ server <- function(input, output, session) {
 
     layout_column_wrap(
       width = 1/4,
-      value_box(title = "Patients seen (Q4)", value = fmt(patients),
+      value_box(title = "Patients seen", value = fmt(patients),
                 showcase = icon("users"), theme = "info"),
-      value_box(title = "Deaths (Q8)", value = fmt(deaths),
+      value_box(title = "Deaths recorded", value = fmt(deaths),
                 showcase = icon("heart-pulse"),
                 theme = if (deaths == 0) "success" else "danger"),
-      value_box(title = "Patients admitted (Q5)", value = fmt(admitted),
+      value_box(title = "Patients admitted", value = fmt(admitted),
                 showcase = icon("bed"), theme = "primary"),
       value_box(title = "Total submissions", value = fmt(subs),
                 showcase = icon("clipboard-list"), theme = "dark",
@@ -761,7 +915,7 @@ server <- function(input, output, session) {
   output$f3_window_label <- renderText({
     invalidateLater(60 * 1000)
     now <- with_tz(Sys.time(), DISPLAY_TZ)
-    paste0("Form 3 patient records, last ", LAST_HOURS, " hours: ",
+    paste0("Patient records, last ", LAST_HOURS, " hours: ",
            format(now - LAST_HOURS * 3600, "%d %b %H:%M"), " \u2013 ",
            format(now, "%d %b %Y %H:%M"))
   })
@@ -815,7 +969,7 @@ server <- function(input, output, session) {
     df <- f3_window()
     if (nrow(df) == 0) {
       return(p(class = "text-muted p-3",
-               paste0("No Form 3 patient records in the last ", LAST_HOURS, " hours.")))
+               paste0("No patient records in the last ", LAST_HOURS, " hours.")))
     }
     df <- df %>% arrange(desc(submitted_local), facility)
     na_dash <- function(x) ifelse(is.na(x) | x == "", "--", x)
