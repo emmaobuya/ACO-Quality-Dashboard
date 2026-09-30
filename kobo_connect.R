@@ -20,6 +20,9 @@
 #   9. (2026-09-28) Added Form 1 Q14 "main blockage" free text as
 #      `main_blockage` (internal name _16_In_one_line_wha_focus_not_a_person),
 #      shown in a table on the Overview tab.
+#  10. (2026-09-30) Form 3 rows now carry the parent submission_time (for
+#      the "last 24 hours" screen), disposition (Q8b) and the "other"
+#      free-text for diagnosis and disposition.
 # ==============================================================================
 
 library(curl)
@@ -81,6 +84,11 @@ diagnosis_lookup <- c(
   "3"  = "Chest pain",          "4"  = "MI",
   "5"  = "Respiratory distress","6"  = "Stroke",
   "7"  = "Surgical emergency",  "8"  = "Obstetric emergency",
+  "88" = "Other"
+)
+disposition_lookup <- c(
+  "1" = "Medical ward",  "2" = "Surgical ward", "3" = "Theatre",
+  "4" = "Mortuary",      "5" = "Referred out",  "6" = "Home",
   "88" = "Other"
 )
 outcome_lookup <- c(
@@ -271,6 +279,7 @@ parse_kobo_data <- function(raw) {
 
       form3_rows[[length(form3_rows) + 1]] <- data.frame(
         parent_uuid           = as.character(root_uuid),
+        submission_time       = as_datetime(as.character(submission_time)),
         facility              = facility_name,
         record_date           = safe_date(find_field(item, "_1_What_is_today_s_date")),
         shift                 = decode_choice(find_field(item, "_2_Which_shift_is_this_for"), shift_lookup),
@@ -278,6 +287,10 @@ parse_kobo_data <- function(raw) {
         triage_id             = as.character(find_field(item, "_4_What_is_the_patie_number_patient_ID")),
         triage_category       = decode_choice(find_field(item, "_9_What_was_the_pati_nt_s_triage_category"), triage_lookup),
         diagnosis             = decode_choice(find_field(item, "_10_What_was_the_main_diagnosis"), diagnosis_lookup),
+        diagnosis_other       = as.character(find_field(item, "Other_specify")),
+        # Q8b "Where were the patients disposed off to?" (+ "Specify other")
+        disposition           = decode_choice(find_field(item, "_8_b_Where_were_the_patinets_d"), disposition_lookup),
+        disposition_other     = as.character(find_field(item, "Specify_other_001")),
         # sepsis_bundle removed from form — kept as NA so app.R doesn't break
         sepsis_bundle         = NA_character_,
         # UPDATED: outcome field renumbered Q11 → Q12 in current form
