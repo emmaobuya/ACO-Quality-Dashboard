@@ -282,7 +282,7 @@ ui <- page_navbar(
                     start = Sys.Date() - 90, end = Sys.Date()),
     hr(),
     checkboxInput("auto_rotate", "Auto-rotate tabs (office screen)",
-                  value = FALSE),
+                  value = TRUE),
     hr(),
     textOutput("connection_status"),
     p(class = "text-muted small",
