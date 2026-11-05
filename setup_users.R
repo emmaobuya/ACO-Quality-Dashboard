@@ -1,77 +1,83 @@
 # ==============================================================================
-# ACO Dashboard -- create the user accounts (run ONCE, on your own computer)
+# ACO Dashboard -- create the user accounts (run on your own computer)
 # ==============================================================================
-# Creates users.sqlite (encrypted) with:
-#   * national_admin  -- national view + admin panel (add users, reset passwords)
-#   * national_team   -- national view, no admin panel
-#   * one login per facility, e.g. arua_rrh -> sees Arua RRH only
+# Run by the ACO admin. Creates users.sqlite (encrypted) with:
+#   * acoadmin  -- national view + admin panel
+#   * acoteam   -- national view, no admin panel
+#   * one login per hospital, no underscores:
+#       Arua RRH  -> username aruarrh,  password aruaaco2026
+#       Gulu RRH  -> username gulurrh,  password guluaco2026  ... and so on
 #
-# Every account gets a random starting password. They are written to
-# initial_passwords.csv so you can hand them out -- then DELETE that file.
-# Never upload initial_passwords.csv with the app.
+# The full list is written to initial_passwords.csv so you can hand the
+# details out -- then DELETE that file. Never upload it with the app.
 #
-# HOW TO RUN
-#   1. install.packages("shinymanager")
-#   2. Put this line in a file called .Renviron next to app.R (pick your own
-#      long phrase), then restart R:
-#        SHINY_DB_PASSPHRASE=some-long-secret-phrase-only-you-know
-#   3. In R, with the working directory set to the app folder:
-#        source("setup_users.R")
+# HOW TO RUN (close Excel first)
+#   setwd("C:/Users/Personal/Desktop/Work/kobo dashboard")
+#   readRenviron(".Renviron")
+#   source("setup_users.R")
 #
-# Running it again REPLACES users.sqlite (all passwords change). To add or
-# change a single user later, use the admin panel inside the dashboard, or
-# edit the `extra_users` table below and re-run.
+# Running it again REPLACES users.sqlite. Afterwards upload the new
+# users.sqlite to GitHub and redeploy.
 # ==============================================================================
 
 library(shinymanager)
 source("kobo_connect.R")   # only for facility_lookup (the facility names)
 
 passphrase <- Sys.getenv("SHINY_DB_PASSPHRASE")
-if (passphrase == "") stop("Set SHINY_DB_PASSPHRASE in .Renviron first (see step 2 above).")
+if (passphrase == "") stop("Run readRenviron(\".Renviron\") first -- SHINY_DB_PASSPHRASE is empty.")
 
-make_password <- function(n = 10) {
-  # No 0/O, 1/l/I -- easier to read out over the phone
+# ---- 1. National account passwords --------------------------------------------
+# Type your own between the quotes. Leave as "" to get a random password
+# (it will be shown in initial_passwords.csv).
+ADMIN_PASSWORD <- "adminaco26"
+TEAM_PASSWORD  <- "acoteam26"
+
+# ---- 2. Which hospitals get an account ----------------------------------------
+# All facilities by default. To set up only some, list them instead, e.g.
+#   HOSPITALS <- c("Arua RRH", "Gulu RRH")
+HOSPITALS <- unname(facility_lookup)
+
+# ---- 3. Password pattern for hospitals -----------------------------------------
+# First word of the facility name + this ending: "Arua RRH" -> aruaaco2026
+HOSPITAL_PASSWORD_ENDING <- "aco26"
+
+# ------------------------------------------------------------------------------
+make_random_password <- function(n = 10) {
   chars <- c(LETTERS[-c(9, 15)], letters[-c(12, 15)], 2:9)
   paste(sample(chars, n, replace = TRUE), collapse = "")
 }
-make_username <- function(facility) {
-  tolower(gsub("[^A-Za-z0-9]+", "_", trimws(facility)))   # "Arua RRH" -> "arua_rrh"
+or_random <- function(p) if (nzchar(p)) p else make_random_password()
+
+# "Arua RRH" -> "aruarrh"
+make_username <- function(facility) tolower(gsub("[^A-Za-z0-9]", "", facility))
+# "Arua RRH" -> "aruaaco26"
+make_hospital_password <- function(facility) {
+  paste0(tolower(gsub("[^A-Za-z0-9]", "", strsplit(trimws(facility), "\\s+")[[1]][1])),
+         HOSPITAL_PASSWORD_ENDING)
 }
 
-facilities <- unname(facility_lookup)
+bad <- setdiff(HOSPITALS, unname(facility_lookup))
+if (length(bad)) stop("Not a facility name in the form: ", paste(bad, collapse = ", "))
 
-# National accounts. facility = "ALL" means "see every facility".
 national <- data.frame(
-  user     = c("national_admin", "national_team"),
+  user     = c("acoadmin", "acoteam"),
+  password = c(or_random(ADMIN_PASSWORD), or_random(TEAM_PASSWORD)),
   facility = c("ALL", "ALL"),
   admin    = c(TRUE, FALSE),
   stringsAsFactors = FALSE
 )
 
-# One account per facility. facility must match the name in facility_lookup
-# EXACTLY (e.g. "Arua RRH"), otherwise the account sees no data at all.
 hospitals <- data.frame(
-  user     = make_username(facilities),
-  facility = facilities,
+  user     = make_username(HOSPITALS),
+  password = vapply(HOSPITALS, make_hospital_password, character(1), USE.NAMES = FALSE),
+  facility = HOSPITALS,
   admin    = FALSE,
   stringsAsFactors = FALSE
 )
 
-# Add more people here if a facility needs a second login, e.g.:
-#   data.frame(user = "arua_rrh_2", facility = "Arua RRH", admin = FALSE)
-extra_users <- data.frame(user = character(0), facility = character(0),
-                          admin = logical(0), stringsAsFactors = FALSE)
+credentials <- rbind(national, hospitals)
+if (anyDuplicated(credentials$user)) stop("Two accounts ended up with the same username.")
 
-credentials <- rbind(national, hospitals, extra_users)
-set.seed(NULL)
-credentials$password <- vapply(seq_len(nrow(credentials)),
-                               function(i) make_password(), character(1))
-
-if (anyDuplicated(credentials$user)) stop("Duplicate usernames: fix extra_users.")
-bad <- setdiff(credentials$facility, c("ALL", facilities))
-if (length(bad)) stop("Unknown facility name(s): ", paste(bad, collapse = ", "))
-
-# Hand-out list (plain text!) -- distribute, then delete.
 write.csv(credentials[, c("user", "password", "facility")],
           "initial_passwords.csv", row.names = FALSE)
 
@@ -82,4 +88,5 @@ create_db(
 )
 
 message("Created users.sqlite with ", nrow(credentials), " accounts.\n",
-        "Starting passwords are in initial_passwords.csv -- share them, then delete that file.")
+        "Usernames and passwords are in initial_passwords.csv -- share them, then delete that file.\n",
+        "Now upload users.sqlite to GitHub and redeploy.")
