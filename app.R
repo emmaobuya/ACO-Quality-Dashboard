@@ -324,6 +324,14 @@ dashboard_ui <- page_navbar(
     id = "main_sidebar",
     width = 280,
     div(class = "small mb-2", uiOutput("signed_in_as")),
+    # Sign-out (and, for admins, the user-management panel). These ids are the
+    # ones shinymanager listens for, so they do exactly what its own floating
+    # button does -- which is switched off below because it was easy to miss.
+    div(class = "d-flex gap-2 mb-3",
+        actionButton(".shinymanager_logout", "Sign out",
+                     icon = icon("right-from-bracket"),
+                     class = "btn-outline-danger btn-sm"),
+        uiOutput("admin_button", inline = TRUE)),
     h5("Filters"),
     selectInput("f_facility", "Health Facility",
                 choices = c("All Facilities", facility_choices),
@@ -529,6 +537,7 @@ dashboard_ui <- page_navbar(
 ui <- secure_app(
   dashboard_ui,
   enable_admin = TRUE,
+  fab_position = "none",   # replaced by the Sign out / Manage users buttons in the sidebar
   tags_top = tags$h4("ACO Emergency Department Dashboard"),
   tags_bottom = tags$p(class = "text-muted small",
                        "Forgot your password? Contact the national ACO team.")
@@ -567,6 +576,14 @@ server <- function(input, output, session) {
              user_facilities()
     tagList(span(class = "text-muted", "Signed in as "), strong(res_auth$user),
             br(), span(class = "badge bg-primary", scope))
+  })
+
+  # "Manage users" button, shown to admin accounts only (acoadmin)
+  output$admin_button <- renderUI({
+    req(res_auth$user)
+    if (!isTRUE(as.logical(res_auth$admin))) return(NULL)
+    actionButton(".shinymanager_admin", "Manage users",
+                 icon = icon("users-gear"), class = "btn-outline-secondary btn-sm")
   })
 
   # Limit every facility drop-down to what the user may see. Hospital users
