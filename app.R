@@ -42,6 +42,16 @@
 #      day options and change vs the previous period). The original
 #      Overview now sits after Weekly Signals. Question numbers removed
 #      from all on-screen labels.
+#  11. (2026-11-05) LOGINS PER FACILITY. The dashboard now opens on a login
+#      screen (shinymanager). Each user account carries a `facility`:
+#        "ALL"          -> national team: sees every facility, as before
+#        "Arua RRH" etc -> hospital team: sees ONLY that facility's data
+#      The restriction is applied on the server, right after the data is
+#      fetched, so a hospital user's browser never receives other
+#      facilities' records -- it is not just a hidden dropdown option.
+#      Accounts live in an encrypted users.sqlite created by setup_users.R.
+#      Users with admin = TRUE get an admin panel (bottom-right button) to
+#      add users, reset passwords and change a user's facility.
 # ==============================================================================
 
 library(shiny)
@@ -51,8 +61,22 @@ library(tidyr)
 library(DT)
 library(plotly)
 library(lubridate)
+library(shinymanager)
 
 source("kobo_connect.R")   # config, fetch, parse -- see that file for details
+
+# ------------------------------------------------------------------------------
+# Login / user accounts
+# ------------------------------------------------------------------------------
+# users.sqlite is created once by setup_users.R. The passphrase that
+# encrypts it is read from an environment variable so it is never written in
+# the code (set it in .Renviron or in your hosting service's settings).
+USERS_DB      <- Sys.getenv("USERS_DB", unset = "users.sqlite")
+DB_PASSPHRASE <- Sys.getenv("SHINY_DB_PASSPHRASE")
+if (DB_PASSPHRASE == "") {
+  stop("SHINY_DB_PASSPHRASE is not set -- see setup_users.R / README.")
+}
+NATIONAL_CODE <- "ALL"   # value of `facility` that means "see everything"
 
 # ------------------------------------------------------------------------------
 # Metric definitions for Form 1 (used by Overview + Facility Trends + Weekly Signals)
@@ -216,7 +240,7 @@ shift_choices <- unname(shift_lookup)
 # ------------------------------------------------------------------------------
 # UI
 # ------------------------------------------------------------------------------
-ui <- page_navbar(
+dashboard_ui <- page_navbar(
   id = "main_nav",
   title = "ACO Dashboard (Live)",
   header = tagList(
@@ -272,6 +296,7 @@ ui <- page_navbar(
   sidebar = sidebar(
     id = "main_sidebar",
     width = 280,
+    div(class = "small mb-2", uiOutput("signed_in_as")),
     h5("Filters"),
     selectInput("f_facility", "Health Facility",
                 choices = c("All Facilities", facility_choices),
@@ -472,10 +497,61 @@ ui <- page_navbar(
   )
 )
 
+# Wrap the whole dashboard in the login screen. enable_admin shows the user
+# management panel to accounts with admin = TRUE (national admins only).
+ui <- secure_app(
+  dashboard_ui,
+  enable_admin = TRUE,
+  tags_top = tags$h4("ACO Emergency Department Dashboard"),
+  tags_bottom = tags$p(class = "text-muted small",
+                       "Forgot your password? Contact the national ACO team.")
+)
+
 # ------------------------------------------------------------------------------
 # SERVER
 # ------------------------------------------------------------------------------
 server <- function(input, output, session) {
+
+  # ---- Login ----
+  # keep_token = TRUE keeps the user signed in when the page reloads itself
+  # (e.g. the office screen's auto-reload after a Wi-Fi blip).
+  res_auth <- secure_server(
+    check_credentials = check_credentials(USERS_DB, passphrase = DB_PASSPHRASE),
+    keep_token = TRUE
+  )
+
+  # Which facilities this user may see. "ALL" = national; a facility name =
+  # that facility only; anything else (blank, typo) = nothing, so a badly set
+  # up account fails closed instead of seeing the whole country.
+  user_facilities <- reactive({
+    req(res_auth$user)
+    f <- res_auth$facility
+    f <- if (is.null(f) || length(f) == 0 || is.na(f)) "" else trimws(as.character(f))
+    if (toupper(f) == NATIONAL_CODE) return(facility_choices)
+    if (f %in% facility_choices) return(f)
+    character(0)
+  })
+  is_national <- reactive(length(user_facilities()) == length(facility_choices))
+
+  output$signed_in_as <- renderUI({
+    req(res_auth$user)
+    scope <- if (is_national()) "National view (all facilities)" else
+             if (length(user_facilities()) == 0) "No facility assigned -- contact the ACO team" else
+             user_facilities()
+    tagList(span(class = "text-muted", "Signed in as "), strong(res_auth$user),
+            br(), span(class = "badge bg-primary", scope))
+  })
+
+  # Limit every facility drop-down to what the user may see. Hospital users
+  # get just their own facility, so "All Facilities" never appears for them.
+  observeEvent(user_facilities(), {
+    fac <- user_facilities()
+    choices <- if (is_national()) c("All Facilities", fac) else fac
+    sel     <- choices[1]
+    for (id in c("f_facility", "wo_blockage_facility", "blockage_facility", "focus_facility")) {
+      updateSelectInput(session, id, choices = choices, selected = sel)
+    }
+  })
 
   # ---- Office-screen mode: cycle through tabs automatically ----
   # ?kiosk=1 in the link switches rotation on and hides the sidebar.
@@ -512,12 +588,26 @@ server <- function(input, output, session) {
   })
 
   # ---- Poll KoboToolbox on a timer ----
-  live_data <- reactivePoll(
+  all_live_data <- reactivePoll(
     intervalMillis = REFRESH_SECONDS * 1000,
     session = session,
     checkFunc = function() Sys.time(),   # always re-check; valueFunc does the real fetch
     valueFunc = function() load_live_data()
   )
+
+  # ---- Restrict the data to the signed-in user's facilities ----
+  # EVERYTHING below reads live_data(), never all_live_data(), so this one
+  # filter scopes every tab, card, chart, table and feed. Nothing renders
+  # until someone has logged in (req inside user_facilities()).
+  live_data <- reactive({
+    d   <- all_live_data()
+    fac <- user_facilities()
+    if (is_national()) return(d)
+    lapply(d, function(df) {
+      if (nrow(df) == 0 || !"facility" %in% names(df)) return(df[0, , drop = FALSE])
+      df[!is.na(df$facility) & df$facility %in% fac, , drop = FALSE]
+    })
+  })
 
   output$connection_status <- renderText({
     d <- live_data()
@@ -852,7 +942,8 @@ server <- function(input, output, session) {
                 showcase = icon("bed"), theme = "primary"),
       value_box(title = "Total submissions", value = fmt(subs),
                 showcase = icon("clipboard-list"), theme = "dark",
-                p(paste0("from ", n_fac, " of ", length(facility_choices), " facilities")))
+                p(paste0("from ", n_fac, " of ", length(user_facilities()),
+                         if (length(user_facilities()) == 1) " facility" else " facilities")))
     )
   })
 
@@ -880,7 +971,7 @@ server <- function(input, output, session) {
       )
     })
 
-    silent <- setdiff(facility_choices, unique(df$facility))
+    silent <- setdiff(user_facilities(), unique(df$facility))
     footer <- if (input$f_facility == "All Facilities" && length(silent) > 0) {
       div(class = "feed-meta mt-3 mb-2",
           strong("No submission in this period: "), paste(silent, collapse = ", "))
