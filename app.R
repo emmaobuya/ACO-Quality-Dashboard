@@ -71,11 +71,38 @@ source("kobo_connect.R")   # config, fetch, parse -- see that file for details
 # users.sqlite is created once by setup_users.R. The passphrase that
 # encrypts it is read from an environment variable so it is never written in
 # the code (set it in .Renviron or in your hosting service's settings).
-USERS_DB      <- Sys.getenv("USERS_DB", unset = "users.sqlite")
+USERS_DB_SRC  <- Sys.getenv("USERS_DB", unset = "users.sqlite")
 DB_PASSPHRASE <- Sys.getenv("SHINY_DB_PASSPHRASE")
 if (DB_PASSPHRASE == "") {
   stop("SHINY_DB_PASSPHRASE is not set -- see setup_users.R / README.")
 }
+if (!file.exists(USERS_DB_SRC)) {
+  stop("users.sqlite not found next to app.R -- run setup_users.R and upload it.")
+}
+
+# The login package writes a log entry into the database at every sign-in.
+# On hosts where the app folder is read-only (e.g. Connect Cloud) that write
+# crashes the session right after the password is entered, so work on a
+# writable copy in the temp folder instead.
+USERS_DB <- file.path(tempdir(), "users.sqlite")
+file.copy(USERS_DB_SRC, USERS_DB, overwrite = TRUE)
+
+# Check at start-up that the passphrase actually opens users.sqlite, so a
+# mismatch shows up as a clear message in the logs rather than as
+# "Disconnected from the server" when someone logs in.
+local({
+  con <- DBI::dbConnect(RSQLite::SQLite(), USERS_DB)
+  on.exit(DBI::dbDisconnect(con))
+  ok <- tryCatch({
+    creds <- shinymanager::read_db_decrypt(con, name = "credentials",
+                                           passphrase = DB_PASSPHRASE)
+    message("users.sqlite opened OK: ", nrow(creds), " accounts")
+    TRUE
+  }, error = function(e) FALSE)
+  if (!ok) stop("SHINY_DB_PASSPHRASE does not match the passphrase users.sqlite ",
+                "was created with. Set the secret to the phrase in your .Renviron ",
+                "(the one used when you ran setup_users.R) and redeploy.")
+})
 NATIONAL_CODE <- "ALL"   # value of `facility` that means "see everything"
 
 # ------------------------------------------------------------------------------
